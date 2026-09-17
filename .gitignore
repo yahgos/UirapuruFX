@@ -1,0 +1,16 @@
+# Saida de compilacao
+build/
+build-*/
+
+# Renders e amostras de audio ficam fora do repositorio: sao grandes e a
+# licenca de cada gravacao depende de onde ela veio.
+*.wav
+*.aif
+*.aiff
+*.mp3
+*.flac
+renders/
+assets/
+
+# macOS
+.DS_Store
