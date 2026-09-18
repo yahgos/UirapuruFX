@@ -31,7 +31,7 @@ void usage() {
         "  uirapuru phrases <passaro.wav> [ms]       mostra as frases detectadas\n"
         "  uirapuru pitchtest <qualquer.wav>         confere o detector de altura\n"
         "  uirapuru chordtest <qualquer.wav>         o detector diante de acordes\n"
-        "  uirapuru birdstats <p1.wav> <p2.wav>      confere a curva de chance\n"
+        "  uirapuru birdstats <uirap.wav> <btv.wav> <mau.wav>  confere o sorteio\n"
         "\nentrada de teste (guitarra sintetica):\n"
         "  --synth             escala pronta, pra quando nao tem gravacao\n"
         "  --tone <hz>         nota parada, pra medir a afinacao isolada\n"
@@ -46,9 +46,10 @@ void usage() {
         "  --grain <ms>        tamanho do grao; pequeno = tagarela (padrao 80)\n"
         "\naltura:\n"
         "  --octaves <n>       oitavas acima da sua nota (padrao 2)\n"
-        "  --ref <hz>          altura de referencia do sample (padrao 1828)\n"
-        "  --ceiling <hz>      acima daqui o passaro dobra uma oitava (padrao 1850)\n"
+        "  --ceiling <hz>      acima daqui o alvo desce uma oitava (padrao 4000)\n"
+        "  --floor <hz>        abaixo daqui o alvo sobe uma oitava (padrao 550)\n"
         "  --no-ceiling        desliga o teto\n"
+        "  --no-floor          desliga o piso\n"
         "  --no-follow         congela o passaro na altura natural dele\n"
         "  --latch             prende a altura no ataque e segura (padrao)\n"
         "  --glide             acompanha bend e slide continuamente\n"
@@ -59,16 +60,20 @@ void usage() {
         "  --rest <ms>         descanso entre chamadas (padrao 400)\n"
         "  --call-max <ms>     teto de uma chamada, medido no arquivo (padrao 1500)\n"
         "  --call-min <ms>     menor pedaco que conta como frase (padrao 150)\n"
-        "\nsegundo passaro (bem-te-vi):\n"
-        "  --bird2 <wav>       carrega o sample do segundo passaro\n"
-        "  --chance <0..1>     o quanto ele aparece, medido no centro (padrao 0,125)\n"
-        "  --no-second         o mesmo que --chance 0\n"
-        "  --tilt-lo <x>       multiplicador da chance em E2 (padrao 0,40)\n"
-        "  --tilt-hi <x>       multiplicador da chance em A5 (padrao 1,60)\n"
-        "  --bird2-octave <n>  oitavas extras so pro bem-te-vi (padrao 1)\n"
-        "  --bird2-gain <x>    volume dele (padrao 0,262; 0,443 no modo frase)\n"
-        "  --force-uira        nunca sorteia o bem-te-vi\n"
-        "  --force-bemtevi     sempre sorteia o bem-te-vi\n"
+        "\nos tres passaros:\n"
+        "  o primeiro posicional e' o uirapuru, casa em 1823 Hz. quem responde a\n"
+        "  cada nota depende de qual casa esta mais perto do alvo.\n"
+        "  --mau <wav>         carrega o Mau, o grave (casa em 790 Hz)\n"
+        "  --bird2 <wav>       carrega o bem-te-vi, o agudo (casa em 2853 Hz)\n"
+        "  --variety <0..1>    o quanto os passaros se misturam (padrao 0,55)\n"
+        "  --ref-mau <hz>      casa do Mau\n"
+        "  --ref <hz>          casa do uirapuru\n"
+        "  --ref2 <hz>         casa do bem-te-vi\n"
+        "  --gain-mau <x>      volume do Mau (padrao 0,157; 0,177 no modo frase)\n"
+        "  --gain2 <x>         volume do bem-te-vi (padrao 0,262; 0,443 no frase)\n"
+        "  --force-mau         sempre o Mau\n"
+        "  --force-uira        sempre o uirapuru\n"
+        "  --force-bemtevi     sempre o bem-te-vi\n"
         "\noutros:\n"
         "  --bird-rate <hz>    simula guardar o passaro nesta taxa (ex: 24000)\n"
         "  --phrase <n>        1|2|3 pra usar uma frase so do arquivo\n"
@@ -171,8 +176,9 @@ int main(int argc, char** argv) {
         BirdEngine e;
         BirdEngine::Params pp;
         pp.frase_min_ms = min_ms;
-        e.Init((float)bird.sample_rate, bird.samples.data(), (int)bird.samples.size());
+        e.Init((float)bird.sample_rate);
         e.SetParams(pp);
+        e.SetBird(1, bird.samples.data(), (int)bird.samples.size());
         const float sr = (float)bird.sample_rate;
         printf("%s   %.2f s   piso %.0f ms\n", argv[2], bird.samples.size() / sr, min_ms);
         printf("%-4s %9s %9s %9s\n", "n", "inicio", "dur(ms)", "pausa(ms)");
@@ -271,71 +277,93 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (cmd == "birdstats") {
-        // Verifica a curva de chance sem depender de ouvido: dispara centenas de
-        // ataques em várias alturas e conta quantas vezes o bem-te-vi saiu.
-        if (argc < 4) { printf("uso: uirapuru estatísticas <pássaro.wav> <bem-te-vi.wav>\n"); return 1; }
-        Audio b2;
+        // Verifica o sorteio sem depender de ouvido: dispara centenas de
+        // ataques em varias alturas e conta quem respondeu.
+        //
+        // argv[2] e' o uirapuru (lido no comeco do main), depois o bem-te-vi e
+        // o Mau. Essa ordem mantem os comandos antigos funcionando.
+        if (argc < 5) {
+            printf("uso: uirapuru birdstats <uirapuru.wav> <bem-te-vi.wav> <mau.wav>\n");
+            return 1;
+        }
+        Audio b2, b0;
         if (!wav_read(argv[3], b2, err)) { printf("erro: %s\n", err.c_str()); return 1; }
+        if (!wav_read(argv[4], b0, err)) { printf("erro: %s\n", err.c_str()); return 1; }
 
         const float sr = 48000.0f;
         const struct { const char* nome; float hz; } alvos[] = {
-            {"E2", 82.41f}, {"E3", 164.81f}, {"C4", 261.63f},
-            {"A4", 440.0f}, {"E5", 659.25f}, {"A5", 880.0f}};
+            {"E2", 82.41f},  {"G2", 98.0f},   {"E3", 164.81f}, {"G3", 196.0f},
+            {"C4", 261.63f}, {"E4", 329.63f}, {"A4", 440.0f},  {"C5", 523.25f},
+            {"E5", 659.25f}, {"A5", 880.0f}};
 
-        printf("%-5s %9s %10s %10s %9s\n", "nota", "esperado", "medido", "ataques", "erro");
+        // Monta um motor com os tres cantos carregados.
+        auto monta = [&](BirdEngine& e, const BirdEngine::Params& pp, unsigned semente) {
+            e.Init(sr);
+            e.SetParams(pp);
+            e.SetBird(0, b0.samples.data(), (int)b0.samples.size());
+            e.SetBird(1, bird.samples.data(), (int)bird.samples.size());
+            e.SetBird(2, b2.samples.data(), (int)b2.samples.size());
+            e.SetSeed(semente);
+        };
+        // 400 palhetadas: 0,25 s de nota e 0,25 s de silencio, pra rearmar.
+        auto toca = [&](BirdEngine& e, float hz, int vezes) {
+            const int nota = (int)(sr * 0.25f), pausa = (int)(sr * 0.25f);
+            float ph = 0.0f;
+            for (int k = 0; k < vezes; k++) {
+                for (int i = 0; i < nota; i++) {
+                    ph += hz / sr;
+                    if (ph >= 1.0f) ph -= 1.0f;
+                    e.Process(0.4f * (2.0f * ph - 1.0f));
+                }
+                for (int i = 0; i < pausa; i++) e.Process(0.0f);
+            }
+        };
+
+        printf("Quem responde, por altura. Variedade no padrao.\n");
+        printf("%-5s %7s %5s %19s %19s\n", "nota", "alvo", "K",
+               "medido (Mau/uir/btv)", "peso  (Mau/uir/btv)");
         for (const auto& t : alvos) {
             BirdEngine e;
-            e.Init(sr, bird.samples.data(), (int)bird.samples.size());
-            e.SetSecondBird(b2.samples.data(), (int)b2.samples.size());
-            e.SetSeed(12345);
             BirdEngine::Params pp;
-            e.SetParams(pp);
-
-            // 400 palhetadas: 0,25 s de nota e 0,25 s de silêncio, pra rearmar.
-            const int nota = (int)(sr * 0.25f), pausa = (int)(sr * 0.25f);
-            float ph = 0.0f;
-            for (int k = 0; k < 400; k++) {
-                for (int i = 0; i < nota; i++) {
-                    ph += t.hz / sr;
-                    if (ph >= 1.0f) ph -= 1.0f;
-                    e.Process(0.4f * (2.0f * ph - 1.0f));
-                }
-                for (int i = 0; i < pausa; i++) e.Process(0.0f);
-            }
-            const float esperado = e.chance_now() * 100.0f;
-            const int   n = e.onset_count();
-            const float medido = n ? 100.0f * e.bird2_count() / n : 0.0f;
-            printf("%-5s %8.1f%% %9.1f%% %10d %8.1f%%\n", t.nome, esperado, medido, n,
-                   medido - esperado);
+            monta(e, pp, 12345);
+            toca(e, t.hz, 400);
+            const int n = e.onset_count();
+            printf("%-5s %6.0fHz %5d   %5.0f%% %5.0f%% %5.0f%%   %5.0f%% %5.0f%% %5.0f%%\n",
+                   t.nome, e.target_hz(), e.octaves_now(),
+                   n ? 100.0f * e.pick_count(0) / n : 0.0f,
+                   n ? 100.0f * e.pick_count(1) / n : 0.0f,
+                   n ? 100.0f * e.pick_count(2) / n : 0.0f,
+                   100.0f * e.weight_now(0), 100.0f * e.weight_now(1),
+                   100.0f * e.weight_now(2));
         }
 
-        // O knob significa o que diz? Ele é definido como a chance no CENTRO do
-        // braço, então medimos exatamente lá (C4) variando o knob.
-        printf("\nknob varrido, medido em C4 (o centro do braço):\n");
-        printf("%8s %10s %10s\n", "knob", "medido", "erro");
-        const float knobs[] = {0.0f, 0.05f, 0.125f, 0.25f, 0.50f, 1.0f};
-        for (float kn : knobs) {
-            BirdEngine e;
-            e.Init(sr, bird.samples.data(), (int)bird.samples.size());
-            e.SetSecondBird(b2.samples.data(), (int)b2.samples.size());
-            e.SetSeed(999);
-            BirdEngine::Params pp;
-            pp.bird2_chance = kn;
-            e.SetParams(pp);
-
-            const int nota = (int)(sr * 0.25f), pausa = (int)(sr * 0.25f);
-            float ph = 0.0f;
-            for (int k = 0; k < 600; k++) {
-                for (int i = 0; i < nota; i++) {
-                    ph += 261.63f / sr;
-                    if (ph >= 1.0f) ph -= 1.0f;
-                    e.Process(0.4f * (2.0f * ph - 1.0f));
-                }
-                for (int i = 0; i < pausa; i++) e.Process(0.0f);
+        // O knob de variedade significa o que diz? Ele promete que em 0 sempre
+        // sai o passaro mais perto de casa, e que subindo os vizinhos entram.
+        // Medimos a media sobre o braco todo.
+        printf("\nKnob de variedade, media sobre as %zu alturas acima:\n",
+               sizeof(alvos) / sizeof(alvos[0]));
+        printf("%10s %11s %9s %10s\n", "variedade", "dominante", "segundo", "terceiro");
+        const float vars[] = {0.0f, 0.3f, 0.55f, 0.75f, 1.0f};
+        for (float v : vars) {
+            double d = 0, s2 = 0, s3 = 0;
+            int notas = 0;
+            for (const auto& t : alvos) {
+                BirdEngine e;
+                BirdEngine::Params pp;
+                pp.variedade = v;
+                monta(e, pp, 999);
+                toca(e, t.hz, 200);
+                const int n = e.onset_count();
+                if (!n) continue;
+                float f[3] = {100.0f * e.pick_count(0) / n,
+                              100.0f * e.pick_count(1) / n,
+                              100.0f * e.pick_count(2) / n};
+                std::sort(f, f + 3, std::greater<float>());
+                d += f[0]; s2 += f[1]; s3 += f[2]; notas++;
             }
-            const int n = e.onset_count();
-            const float medido = n ? 100.0f * e.bird2_count() / n : 0.0f;
-            printf("%7.1f%% %9.1f%% %9.1f%%\n", kn * 100.0f, medido, medido - kn * 100.0f);
+            if (notas)
+                printf("%9.0f%% %10.0f%% %8.0f%% %9.0f%%\n", v * 100.0f,
+                       d / notas, s2 / notas, s3 / notas);
         }
         return 0;
     }
@@ -350,7 +378,7 @@ int main(int argc, char** argv) {
     bool climb = false;
     float solo_nps = 0.0f;
     float bend_semis = 0.0f;
-    std::string bird2_path;
+    std::string bird2_path, mau_path;
     unsigned seed = 0;
     bool trace = false;
     int bird_rate = 0, phrase = 0;
@@ -374,7 +402,7 @@ int main(int argc, char** argv) {
         else if (a == "--mix")          p.mix = arg_f(next());
         else if (a == "--grain")        p.grain_ms = arg_f(next());
         else if (a == "--octaves")      p.octave_offset = atoi(next());
-        else if (a == "--ref")          p.bird_ref_hz = arg_f(next());
+        else if (a == "--ref")          p.casa_hz[1] = arg_f(next());
                 else if (a == "--dynamics")     p.dynamics = arg_f(next());
         else if (a == "--no-follow")    p.pitch_follow = false;
         else if (a == "--no-quantize")  p.modo_altura = BirdEngine::Params::DESLIZA;
@@ -392,18 +420,21 @@ int main(int argc, char** argv) {
             { p.onset_rel_ms = p.onset_rel_frase_ms = atof(argv[++i]); }
         else if (a == "--onset-env" && i + 1 < argc)
             { p.onset_env_rel_ms = p.onset_env_frase_ms = atof(argv[++i]); }
-        else if (a == "--no-ceiling")   p.ceiling_hz = 0.0f;
+        else if (a == "--no-ceiling")   p.teto_hz = 0.0f;
         else if (a == "--bird2")        bird2_path = next();
-        else if (a == "--no-second")    p.bird2_chance = 0.0f;
-        else if (a == "--chance")       p.bird2_chance = arg_f(next());
-        else if (a == "--tilt-lo")      p.bird2_tilt_lo = arg_f(next());
-        else if (a == "--tilt-hi")      p.bird2_tilt_hi = arg_f(next());
-        else if (a == "--force-uira")   p.force_bird = 1;
-        else if (a == "--force-bemtevi") p.force_bird = 2;
-        else if (a == "--bird2-octave") p.bird2_octave_bonus = atoi(next());
-        else if (a == "--bird2-gain")   { p.bird2_gain = p.bird2_gain_frase = arg_f(next()); }
+        else if (a == "--mau")          mau_path = next();
+        else if (a == "--variety")      p.variedade = arg_f(next());
+        else if (a == "--floor")        p.piso_hz = arg_f(next());
+        else if (a == "--no-floor")     p.piso_hz = 0.0f;
+        else if (a == "--force-mau")     p.force_bird = 1;
+        else if (a == "--force-uira")    p.force_bird = 2;
+        else if (a == "--force-bemtevi") p.force_bird = 3;
+        else if (a == "--ref-mau")      p.casa_hz[0] = arg_f(next());
+        else if (a == "--ref2")         p.casa_hz[2] = arg_f(next());
+        else if (a == "--gain-mau")     { p.ganho[0] = p.ganho_frase[0] = arg_f(next()); }
+        else if (a == "--gain2")        { p.ganho[2] = p.ganho_frase[2] = arg_f(next()); }
         else if (a == "--seed")         seed = (unsigned)atoi(next());
-        else if (a == "--ceiling")      p.ceiling_hz = arg_f(next());
+        else if (a == "--ceiling")      p.teto_hz = arg_f(next());
         else if (a == "--normalize")    do_normalize = true;
         else if (a == "--trace")        trace = true;
         else if (a.rfind("--", 0) == 0) { printf("opção desconhecida %s\n", a.c_str()); return 1; }
@@ -529,16 +560,29 @@ int main(int argc, char** argv) {
                guitar.sample_rate, bird.sample_rate);
 
     // --- renderiza ---
+    //
+    // SetParams antes dos SetBird de proposito: o piso de segmentacao e as
+    // casas precisam estar no lugar quando cada canto for carregado e cortado
+    // em frases.
     BirdEngine engine;
-    engine.Init((float)guitar.sample_rate, bird.samples.data(), (int)bird.samples.size());
+    engine.Init((float)guitar.sample_rate);
     engine.SetParams(p);
     if (seed) engine.SetSeed(seed);
 
-    Audio bird2;
+    // O primeiro posicional e' o uirapuru (indice 1), o que mantem todo comando
+    // antigo funcionando. Mau e bem-te-vi entram por flag.
+    engine.SetBird(1, bird.samples.data(), (int)bird.samples.size());
+
+    Audio bird2, mau;
     if (!bird2_path.empty()) {
         if (!wav_read(bird2_path, bird2, err)) { printf("erro: %s\n", err.c_str()); return 1; }
         if (bird_rate > 0) simulate_storage_rate(bird2, bird_rate);
-        engine.SetSecondBird(bird2.samples.data(), (int)bird2.samples.size());
+        engine.SetBird(2, bird2.samples.data(), (int)bird2.samples.size());
+    }
+    if (!mau_path.empty()) {
+        if (!wav_read(mau_path, mau, err)) { printf("erro: %s\n", err.c_str()); return 1; }
+        if (bird_rate > 0) simulate_storage_rate(mau, bird_rate);
+        engine.SetBird(0, mau.samples.data(), (int)mau.samples.size());
     }
 
     Audio out;
@@ -567,15 +611,24 @@ int main(int argc, char** argv) {
            p.speed, p.mix, p.grain_ms, p.pitch_follow ? "sim" : "nao", (float)p.octave_offset);
     printf("final   : detectou %.1f Hz  transposição %+.0f cents\n", engine.detected_hz(),
            engine.transposition_cents());
-    if (engine.has_second_bird()) {
+    printf("alvo    : %.0f Hz  (%+d oitavas sobre a nota)   piso %.0f  teto %.0f\n",
+           engine.target_hz(), engine.octaves_now(), p.piso_hz, p.teto_hz);
+    {
+        static const char* kNomes[3] = {"Mau", "uirapuru", "bem-te-vi"};
         const int n = engine.onset_count();
-        printf("pássaros: %d ataques, bem-te-vi sorteado %d vezes (%.0f%%)%s\n", n, engine.bird2_count(),
-               n ? 100.0 * engine.bird2_count() / n : 0.0,
-               p.bird2_chance > 0.0f ? "" : "  [bem-te-vi DESLIGADO]");
+        printf("pássaros: %d ataques   ", n);
+        for (int i = 0; i < 3; i++) {
+            if (!engine.has_bird(i)) continue;
+            printf("%s %.0f%%   ", kNomes[i],
+                   n ? 100.0 * engine.pick_count(i) / n : 0.0);
+        }
+        printf("\nvariedade: %.0f%%\n", p.variedade * 100.0f);
     }
     if (p.modo_disparo == BirdEngine::Params::FRASE) {
-        printf("frases  : uirapuru %d", engine.phrase_count(1));
-        if (engine.has_second_bird()) printf(", bem-te-vi %d", engine.phrase_count(2));
+        static const char* kNomes[3] = {"Mau", "uirapuru", "bem-te-vi"};
+        printf("frases  :");
+        for (int i = 0; i < 3; i++)
+            if (engine.has_bird(i)) printf(" %s %d", kNomes[i], engine.phrase_count(i));
         printf("   espaço %.0f ms   teto %.0f ms\n", p.espaco_ms, p.frase_max_ms);
         printf("chamada: %d disparadas, %d ataques ignorados por estar ocupado\n",
                engine.onset_count(), engine.ignored_count());

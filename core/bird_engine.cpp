@@ -76,7 +76,7 @@ void BirdEngine::SegmentaFrases(const std::vector<float>& s,
 
 int BirdEngine::SorteiaFrase(int bird)
 {
-    const std::vector<Frase>& f = (bird == 2 ? frases2_ : frases_);
+    const std::vector<Frase>& f = passaros_[bird].frases;
     const int n = (int)f.size();
     if(n <= 1) return 0;
 
@@ -90,24 +90,21 @@ int BirdEngine::SorteiaFrase(int bird)
 
 void BirdEngine::ComecaChamada()
 {
-    const int bird = want_bird2_ ? 2 : 1;
-    const std::vector<Frase>& f = (bird == 2 ? frases2_ : frases_);
-    const std::vector<float>& amostras = (bird == 2 ? bird2_ : bird_);
-    if(f.empty() || amostras.empty()) return;
+    Passaro& pa = passaros_[para_];
+    if(pa.frases.empty() || pa.sample.empty()) return;
 
-    const int i = SorteiaFrase(bird);
+    const int i = SorteiaFrase(para_);
     frase_ant_  = i;
 
     // Apara pelo teto, contado no ARQUIVO. Assim o teto significa a mesma
     // coisa em qualquer velocidade.
-    int len = f[i].len;
+    int len = pa.frases[i].len;
     const int teto = (int)(p_.frase_max_ms * 0.001f * sr_);
     if(teto > 0 && len > teto) len = teto;
 
     // Aponta o granular pro trecho. O size dele passa a ser o da frase, então
     // uma volta do fasor de posição é exatamente uma passada pela frase.
-    uirapuru::GranularPlayer& g = (bird == 2 ? gran2_ : gran_);
-    g.Restart(const_cast<float*>(amostras.data()) + f[i].ini, len);
+    pa.gran.Restart(const_cast<float*>(pa.sample.data()) + pa.frases[i].ini, len);
 
     // Quanto tempo de saída isso dá: a frase tem len amostras de arquivo e é
     // lida a `speed`, então demora len/speed. Com speed < 1 estica.
@@ -117,15 +114,42 @@ void BirdEngine::ComecaChamada()
 
     // Com o portão fechado dá pra trocar de pássaro na hora, sem crossfade:
     // não tem o que estalar se não está saindo som.
-    xfade_    = want_bird2_ ? 1.0f : 0.0f;
+    de_       = para_;
+    xfade_    = 1.0f;
     cantando_ = true;
     descanso_ = 0;
 }
 
-void BirdEngine::Init(float sample_rate, const float* bird, int bird_len) {
+int BirdEngine::phrase_count(int bird) const
+{
+    if(bird < 0 || bird >= Params::kPassaros) return 0;
+    return (int)passaros_[bird].frases.size();
+}
+
+void BirdEngine::phrase_at(int bird, int i, int& ini, int& len) const
+{
+    ini = len = 0;
+    if(bird < 0 || bird >= Params::kPassaros) return;
+    const std::vector<Frase>& f = passaros_[bird].frases;
+    if(i < 0 || i >= (int)f.size()) return;
+    ini = f[i].ini;
+    len = f[i].len;
+}
+
+bool BirdEngine::has_bird(int bird) const
+{
+    return bird >= 0 && bird < Params::kPassaros && !passaros_[bird].sample.empty();
+}
+
+int BirdEngine::bird_count() const
+{
+    int n = 0;
+    for(int i = 0; i < Params::kPassaros; i++) if(has_bird(i)) n++;
+    return n;
+}
+
+void BirdEngine::Init(float sample_rate) {
     sr_ = sample_rate;
-    bird_.assign(bird, bird + bird_len);
-    gran_.Init(bird_.data(), (int)bird_.size(), sample_rate);
     pitch_.Init(sample_rate);
 
     // Glissando de ~60 ms na transposição: rápido o bastante pra responder
@@ -148,23 +172,28 @@ void BirdEngine::Init(float sample_rate, const float* bird, int bird_len) {
     // frase estalam; 12 ms não é audível como fade, só mata o clique.
     gate_coeff_ = 1.0f - expf(-1.0f / (0.012f * sr_));
 
-    // Acha as frases do canto. Aloca, então é aqui e não no Process.
-    SegmentaFrases(bird_, sr_, p_.frase_min_ms, frases_);
-    min_ms_usado_ = p_.frase_min_ms;
+    for(int i = 0; i < Params::kPassaros; i++)
+    {
+        passaros_[i].sample.clear();
+        passaros_[i].frases.clear();
+        passaros_[i].cents_smooth = 0.0f;
+    }
+    min_ms_usado_ = -1.0f;
 
-    cents_smooth_ = 0.0f;
     env_          = 0.0f;
     have_pitch_   = false;
     refract_      = 0;
-    latched_cents_ = 0.0f;
-    congela_em_    = 0;
+    latched_hz_ = 0.0f;
+    congela_em_ = 0;
     congelado_     = false;
     on_fast_ = thresh_ = 0.0f;
-    want_bird2_   = false;
-    xfade_        = 0.0f;
-    onsets_       = 0;
-    picks2_       = 0;
-    ignorados_    = 0;
+    de_ = para_ = 1;
+    xfade_       = 1.0f;
+    onsets_      = 0;
+    ignorados_   = 0;
+    for(int i = 0; i < Params::kPassaros; i++) { picks_[i] = 0; peso_now_[i] = 0.0f; }
+    alvo_now_ = 0.0f;
+    k_now_    = 0;
     cantando_       = false;
     canto_restante_ = 0;
     descanso_       = 0;
@@ -189,31 +218,33 @@ void BirdEngine::SetParams(const Params& p)
     const bool piso_mudou = (p.frase_min_ms != min_ms_usado_);
     p_ = p;
     AtualizaCoefsAtaque();
+
+    // As casas podem ter mudado, e o deslocamento de cada pássaro sai delas.
+
     if(piso_mudou)
     {
-        SegmentaFrases(bird_, sr_, p_.frase_min_ms, frases_);
-        if(!bird2_.empty()) SegmentaFrases(bird2_, sr_, p_.frase_min_ms, frases2_);
+        for(int i = 0; i < Params::kPassaros; i++)
+            if(!passaros_[i].sample.empty())
+                SegmentaFrases(passaros_[i].sample, sr_, p_.frase_min_ms,
+                               passaros_[i].frases);
         min_ms_usado_ = p_.frase_min_ms;
         frase_ant_    = -1;
     }
 }
 
-void BirdEngine::SetSecondBird(const float* bird, int bird_len)
+void BirdEngine::SetBird(int bird, const float* sample, int len)
 {
-    bird2_.assign(bird, bird + bird_len);
-    gran2_.Init(bird2_.data(), (int)bird2_.size(), sr_);
+    if(bird < 0 || bird >= Params::kPassaros || sample == nullptr || len <= 0) return;
 
-    // A frequência alvo é a mesma pros dois pássaros, então a diferença de
-    // cents entre eles é uma constante: só as referências (e a oitava extra)
-    // mudam. Guardar como deslocamento fixo garante que eles nunca desafinem um
-    // em relação ao outro, por mais que o alvo se mexa.
-    //
-    //   cents2 = cents1 + 1200*log2(ref1/ref2) + 1200*bonus
-    cents2_offset_ = 1200.0f * log2f(p_.bird_ref_hz / p_.bird2_ref_hz)
-                     + 1200.0f * (float)p_.bird2_octave_bonus;
-
-    SegmentaFrases(bird2_, sr_, p_.frase_min_ms, frases2_);
+    Passaro& pa = passaros_[bird];
+    pa.sample.assign(sample, sample + len);
+    pa.gran.Init(pa.sample.data(), (int)pa.sample.size(), sr_);
+    SegmentaFrases(pa.sample, sr_, p_.frase_min_ms, pa.frases);
     min_ms_usado_ = p_.frase_min_ms;
+
+
+    // Se o pássaro que estava selecionado não tem sample, cai pra este.
+    if(!has_bird(para_)) { de_ = para_ = bird; xfade_ = 1.0f; }
 }
 
 float BirdEngine::NextRandom()
@@ -224,35 +255,87 @@ float BirdEngine::NextRandom()
     return (float)(rng_ >> 8) * (1.0f / 16777216.0f); // 0..1
 }
 
-float BirdEngine::ChanceOfBird2(float played_hz) const
+void BirdEngine::PesosDosPassaros(float played_hz, float* peso) const
 {
-    if(p_.bird2_chance <= 0.0f) return 0.0f;
+    for(int i = 0; i < Params::kPassaros; i++) peso[i] = 0.0f;
 
-    // Onde estamos no braço, de 0 (grave) a 1 (agudo). Interpolado em log2, ou
-    // seja, por oitavas, é assim que o ouvido percebe altura.
-    float t = 0.5f; // sem altura detectada, assume o centro
-    if(played_hz > 0.0f)
+    // O sorteio usa outra régua que a altura: o REGISTRO em que você tocou,
+    // que é a nota deslocada por uma oitava de referência fixa. Precisa ser
+    // assim porque, com cada pássaro perto da própria casa, distância de casa
+    // não diferencia mais ninguém: os três ficam dentro de meia oitava.
+    const float alvo = (played_hz > 0.0f)
+                           ? played_hz * powf(2.0f, (float)p_.oitava_registro)
+                           : 0.0f;
+    if(alvo <= 0.0f)
     {
-        const float span = log2f(p_.chance_f_hi / p_.chance_f_lo);
-        if(span > 0.0f)
-        {
-            t = log2f(played_hz / p_.chance_f_lo) / span;
-            if(t < 0.0f) t = 0.0f;
-            if(t > 1.0f) t = 1.0f;
-        }
+        // Sem altura detectada ainda. Fica no pássaro do meio, que é o que
+        // cobre a maior parte do braço.
+        peso[1] = 1.0f;
+        return;
     }
 
-    // O knob dá o valor no centro; a inclinação distribui em volta dele.
-    const float tilt = p_.bird2_tilt_lo + (p_.bird2_tilt_hi - p_.bird2_tilt_lo) * t;
-    float c = p_.bird2_chance * tilt;
-    if(c < 0.0f) c = 0.0f;
-    if(c > 1.0f) c = 1.0f;
-    return c;
+    // Peso cai com o quadrado da distância até a casa, em cents. A `variedade`
+    // abre a curva: apertada, só o mais perto sobrevive; aberta, os vizinhos
+    // de região entram no sorteio.
+    const float sigma = 40.0f + p_.variedade * 900.0f;
+    float soma = 0.0f;
+    int   perto = -1;
+    float menor = 1e9f;
+    for(int i = 0; i < Params::kPassaros; i++)
+    {
+        if(!has_bird(i)) continue;
+        const float d = 1200.0f * log2f(alvo / p_.casa_hz[i]);
+        if(fabsf(d) < menor) { menor = fabsf(d); perto = i; }
+        const float x = d / sigma;
+        peso[i] = expf(-x * x);
+        soma += peso[i];
+    }
+
+    // Com sigma apertado e o alvo longe de tudo, todos os pesos somem no
+    // subfluxo. Aí o mais perto leva, que é o comportamento certo: nunca ficar
+    // sem pássaro.
+    if(soma <= 1e-12f)
+    {
+        for(int i = 0; i < Params::kPassaros; i++) peso[i] = 0.0f;
+        if(perto >= 0) peso[perto] = 1.0f;
+        return;
+    }
+    for(int i = 0; i < Params::kPassaros; i++) peso[i] /= soma;
+}
+
+int BirdEngine::EscolhePassaro(float played_hz)
+{
+    // Força um pássaro só, pra comparar de ouvido. 1..3 na linha de comando
+    // viram 0..2 aqui.
+    if(p_.force_bird >= 1 && p_.force_bird <= Params::kPassaros)
+    {
+        const int f = p_.force_bird - 1;
+        if(has_bird(f)) return f;
+    }
+
+    PesosDosPassaros(played_hz, peso_now_);
+
+    // Roleta: sorteia um ponto em [0,1) e caminha somando os pesos.
+    const float r = NextRandom();
+    float acc = 0.0f;
+    for(int i = 0; i < Params::kPassaros; i++)
+    {
+        acc += peso_now_[i];
+        if(r < acc && has_bird(i)) return i;
+    }
+    // Arredondamento pode deixar r acima da soma na última casa. Devolve o
+    // último com sample, em vez de cair num índice vazio.
+    for(int i = Params::kPassaros - 1; i >= 0; i--) if(has_bird(i)) return i;
+    return para_;
 }
 
 void BirdEngine::Retrigger() {
-    gran_.Restart(bird_.data(), (int)bird_.size());
-    if(!bird2_.empty()) gran2_.Restart(bird2_.data(), (int)bird2_.size());
+    for(int i = 0; i < Params::kPassaros; i++)
+    {
+        Passaro& pa = passaros_[i];
+        if(!pa.sample.empty())
+            pa.gran.Restart(pa.sample.data(), (int)pa.sample.size());
+    }
     cantando_       = false;
     canto_restante_ = 0;
     descanso_       = 0;
@@ -260,8 +343,10 @@ void BirdEngine::Retrigger() {
     gate_           = 0.0f;
 }
 
-float BirdEngine::TargetCents(float played_hz) const {
-    if(played_hz <= 0.0f) return 0.0f;
+float BirdEngine::AlvoHz(int bird, float played_hz, int* k_usado) const
+{
+    if(k_usado) *k_usado = 0;
+    if(played_hz <= 0.0f || bird < 0 || bird >= Params::kPassaros) return 0.0f;
 
     float hz = played_hz;
     if(p_.modo_altura == Params::DEGRAU)
@@ -272,36 +357,44 @@ float BirdEngine::TargetCents(float played_hz) const {
         hz               = 440.0f * powf(2.0f, (midi - 69.0f) / 12.0f);
     }
 
-    // Canta a nota que você acabou de tocar, algumas oitavas acima.
+    // A oitava que deixa ESTE pássaro mais perto da casa DELE.
     //
-    // O detalhe de serem oitavas INTEIRAS é o que importa: assim o pássaro fica
-    // exatamente na mesma classe de nota que a sua, e nunca sai do tom. Isso
-    // vale em toda a extensão do braço, sem exceção.
-    //
-    // O que NÃO vale é o pássaro subir sempre junto com você. O teto reduz o
-    // deslocamento quando o alvo passaria dele, e aí o pássaro desce uma oitava
-    // inteira. Medido na saída real, com o teto em 1850 Hz:
-    //
-    //   E2 a A4       x4     pássaro de 330 a 1760 Hz
-    //   A#4 a A5      x2     pássaro de 932 a 1760 Hz
-    //   A#5 pra cima  x1     pássaro de 932 Hz pra cima
-    //
-    // Nas duas fronteiras você sobe um semitom e o pássaro cai onze. É o preço
-    // combinado: dobrar pra baixo em vez de ficar fino e sibilante. Quem quiser
-    // o mapeamento sempre subindo desliga o teto com ceiling_hz = 0.
-    int k = p_.octave_offset;
-    if(p_.ceiling_hz > 0.0f && hz > 0.0f)
-    {
-        // Quantas oitavas ainda cabem debaixo do teto. Se forem menos do que o
-        // deslocamento pedido, desce de oitava em oitava até caber, e como é
-        // oitava inteira, continua na mesma nota que você tocou.
-        const int k_max = (int)floorf(log2f(p_.ceiling_hz / hz));
-        if(k_max < k) k = k_max;
-        if(k < 0) k = 0; // no limite, o pássaro canta a sua própria nota
-    }
+    // Arredondar o logaritmo é o que garante o mínimo esticamento: o resto
+    // nunca passa de meia oitava, então o canto nunca é deformado mais que
+    // isso. E K sendo inteiro, a classe da nota não muda, ou seja não desafina.
+    int k = (int)roundf(log2f(p_.casa_hz[bird] / hz)) + p_.octave_offset;
 
-    const float target_hz = hz * powf(2.0f, (float)k);
-    return 1200.0f * log2f(target_hz / p_.bird_ref_hz);
+    // Piso e teto ficam desligados por padrão. Com a oitava por pássaro o alvo
+    // já cai perto de casa sozinho; estes existem pra experimentar.
+    if(p_.teto_hz > 0.0f)
+        while(k > -10 && hz * powf(2.0f, (float)k) > p_.teto_hz) k--;
+    if(p_.piso_hz > 0.0f)
+        while(k < 10 && hz * powf(2.0f, (float)k) < p_.piso_hz) k++;
+
+    if(k_usado) *k_usado = k;
+    return hz * powf(2.0f, (float)k);
+}
+
+float BirdEngine::CentsDoPassaro(int bird, float played_hz) const
+{
+    // Sem nota detectada o pássaro fica na altura natural dele, que é zero de
+    // transposição. É o repouso.
+    if(played_hz <= 0.0f || bird < 0 || bird >= Params::kPassaros) return 0.0f;
+    const float alvo = AlvoHz(bird, played_hz);
+    if(alvo <= 0.0f) return 0.0f;
+    return 1200.0f * log2f(alvo / p_.casa_hz[bird]);
+}
+
+float BirdEngine::TargetCents(float played_hz) const
+{
+    return CentsDoPassaro(para_, played_hz);
+}
+
+float BirdEngine::AlturaEfetiva() const
+{
+    if(!p_.pitch_follow || !have_pitch_) return 0.0f;
+    if(p_.modo_altura == Params::TRAVA && congelado_) return latched_hz_;
+    return pitch_.stable_frequency();
 }
 
 float BirdEngine::Process(float in) {
@@ -316,25 +409,33 @@ float BirdEngine::Process(float in) {
         }
     }
 
-    const float target = (p_.pitch_follow && have_pitch_)
-                             ? TargetCents(pitch_.stable_frequency())
-                             : 0.0f;
-    // No modo TRAVA o pássaro segue ao vivo enquanto o detector assenta e
-    // depois congela. Daí em diante bend, slide e vibrato não o movem mais.
-    float alvo = target;
-    if(p_.modo_altura == Params::TRAVA)
+    // A TRAVA agora congela a NOTA, não os cents.
+    //
+    // Antes dava no mesmo, porque havia um alvo só. Agora cada pássaro tem o
+    // próprio alvo, então travar cents travaria um pássaro e deixaria os outros
+    // soltos. Travando a nota, os três param juntos.
+    //
+    // Ele não congela no instante do ataque: o detector precisa de ~110 ms pra
+    // ter mediana confiável da nota nova, e travar na hora pegaria a altura da
+    // ANTERIOR. Então segue ao vivo durante o assentamento e só depois congela.
+    // Assim não há atraso, e a estabilidade vale onde importa, que é no corpo
+    // sustentado da nota, onde o bend e o vibrato acontecem.
+    if(p_.modo_altura == Params::TRAVA && !congelado_ &&
+       congela_em_ > 0 && --congela_em_ == 0)
     {
-        if(congelado_)
-        {
-            alvo = latched_cents_;
-        }
-        else if(congela_em_ > 0 && --congela_em_ == 0)
-        {
-            latched_cents_ = target;
-            congelado_     = true;
-        }
+        latched_hz_ = (p_.pitch_follow && have_pitch_)
+                          ? pitch_.stable_frequency() : 0.0f;
+        congelado_  = true;
     }
-    cents_smooth_ += cents_coeff_ * (alvo - cents_smooth_);
+
+    // Cada pássaro persegue o próprio alvo. Os calados também, pra já estarem
+    // na altura certa quando forem sorteados.
+    const float hz_efetivo = AlturaEfetiva();
+    for(int i = 0; i < Params::kPassaros; i++)
+    {
+        const float alvo_i = CentsDoPassaro(i, hz_efetivo);
+        passaros_[i].cents_smooth += cents_coeff_ * (alvo_i - passaros_[i].cents_smooth);
+    }
 
     // Segue a dinâmica da guitarra pro pássaro respirar junto com o seu toque.
     const float rect = fabsf(in);
@@ -351,8 +452,7 @@ float BirdEngine::Process(float in) {
     const bool alto    = on_fast_ > 0.015f;
     const bool subindo = on_fast_ > thresh_ * 1.30f;
 
-    const bool tem_segundo = p_.bird2_chance > 0.0f && !bird2_.empty();
-    const bool modo_frase  = (p_.modo_disparo == Params::FRASE);
+    const bool modo_frase = (p_.modo_disparo == Params::FRASE);
 
     // No modo frase o pássaro não atende enquanto está cantando nem enquanto
     // descansa. É isso que dá o espaçamento: o ataque chega, e é ignorado.
@@ -369,14 +469,24 @@ float BirdEngine::Process(float in) {
             congelado_  = false;
             congela_em_ = (int)(0.130f * sr_);
             onsets_++;
-            chance_now_ = ChanceOfBird2(have_pitch_ ? pitch_.stable_frequency() : 0.0f);
 
-            if (p_.force_bird == 1)       want_bird2_ = false;
-            else if (p_.force_bird == 2)  want_bird2_ = true;
-            else if (!tem_segundo)        want_bird2_ = false;
-            else                          want_bird2_ = (NextRandom() < chance_now_);
+            // Sorteia quem responde. O pássaro mais perto da casa dele ganha
+            // mais chance; a `variedade` decide o quanto os vizinhos entram.
+            const float toque = have_pitch_ ? pitch_.stable_frequency() : 0.0f;
+            // Sorteia UMA vez: cada chamada consome o gerador, e chamar duas
+            // vezes quebraria a estatística do sorteio.
+            const int novo = EscolhePassaro(toque);
+            picks_[novo]++;
+            alvo_now_ = AlvoHz(novo, toque, &k_now_);
 
-            if (want_bird2_) picks2_++;
+            // Troca com crossfade curto. Só duas vozes participam de cada
+            // troca, e o bloqueio de 80 ms garante que uma termine antes da
+            // próxima começar.
+            if (novo != para_) {
+                de_    = para_;
+                para_  = novo;
+                xfade_ = 0.0f;
+            }
 
             if (modo_frase) {
                 // Quão forte foi a palhetada, pra chamada sair no volume do
@@ -397,7 +507,6 @@ float BirdEngine::Process(float in) {
             }
         }
     }
-    if (!tem_segundo) want_bird2_ = false;
 
     // --- modo frase: toca a chamada, depois descansa ----------------------
     if (modo_frase) {
@@ -438,26 +547,29 @@ float BirdEngine::Process(float in) {
     float grain = p_.grain_ms;
     if (grain < 1.0f) grain = 1.0f;
 
-    // Caminha o crossfade em direção ao pássaro escolhido.
-    xfade_ += xfade_coeff_ * ((want_bird2_ ? 1.0f : 0.0f) - xfade_);
+    // Caminha o crossfade em direção ao pássaro que entrou.
+    xfade_ += xfade_coeff_ * (1.0f - xfade_);
+
+    // Uma voz por pássaro envolvido na troca. Fora do instante da troca só uma
+    // roda, então o custo de CPU normal é o de um granular, não de três.
+    auto voz = [&](int i) -> float {
+        Passaro& pa = passaros_[i];
+        if (pa.sample.empty()) return 0.0f;
+        const float g = modo_frase ? p_.ganho_frase[i] : p_.ganho[i];
+        return g * pa.gran.Process(p_.speed, pa.cents_smooth, grain);
+    };
 
     float bird;
     if (modo_frase && !cantando_ && gate_ < 0.001f) {
         // Descansando: nem processa o granular. Na Daisy isso devolve a CPU
         // inteira nos intervalos, que é a maior parte do tempo.
         bird = 0.0f;
-    } else if (!tem_segundo && xfade_ < 0.001f) {
-        // Com a chave desligada nem processamos o segundo granular, o custo de
-        // CPU volta a ser o de antes, o que importa na Daisy.
-        bird = gran_.Process(p_.speed, cents_smooth_, grain);
+    } else if (de_ == para_ || xfade_ > 0.999f) {
+        bird = voz(para_);
     } else {
-        const float a = gran_.Process(p_.speed, cents_smooth_, grain);
-        const float g2 = modo_frase ? p_.bird2_gain_frase : p_.bird2_gain;
-        const float b  = g2
-                        * gran2_.Process(p_.speed, cents_smooth_ + cents2_offset_, grain);
         // Potência igual, como na mistura seco/molhado: sem queda de volume no
         // meio da transição.
-        bird = sqrtf(1.0f - xfade_) * a + sqrtf(xfade_) * b;
+        bird = sqrtf(1.0f - xfade_) * voz(de_) + sqrtf(xfade_) * voz(para_);
     }
     // No modo frase a dinâmica vira a forma da própria chamada: o quão forte
     // você tocou define o volume dela, e o portão a abre e fecha. O envelope

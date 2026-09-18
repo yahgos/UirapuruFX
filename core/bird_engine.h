@@ -132,124 +132,185 @@ class BirdEngine {
         float onset_env_frase_ms = 12.0f;   // frase
         float onset_rel_frase_ms = 25.0f;
 
-        // A altura mediana do próprio sample: é a referência de onde toda a
-        // transposição é medida.
+        // --- OS TRÊS PÁSSAROS ---------------------------------------------
         //
-        // Este valor vale pra gravação de uirapuru que eu uso. Se você trocar
-        // o arquivo, meça a mediana do seu e ajuste aqui, senão o pássaro sai
-        // afinado em relação à referência errada.
-        float bird_ref_hz = 1828.0f;
+        // Cada canto tem uma CASA: a altura mediana da gravação, medida. Longe
+        // de casa o canto soa estranho, e é esse o problema que o terceiro
+        // pássaro resolve.
+        //
+        // Medido com o mesmo método nas três gravações, o que importa: se cada
+        // referência vier de um método diferente, os pássaros não pousam na
+        // mesma altura e a troca desafina.
+        //
+        // A do Mau é a exceção, e vale saber por quê. A mediana do arquivo dele
+        // dá 940 Hz, mas com esse valor a saída renderizada pousava 267 cents
+        // ABAIXO das outras duas. O canto dele é bimodal (p10 em 675 Hz, p90 em
+        // 1452), e nesse caso a mediana do arquivo não prevê onde o resultado
+        // transposto cai. Os 805 saíram de varredura na SAÍDA, procurando o
+        // valor que faz o pássaro pousar no alvo. É o que "referência" quer
+        // dizer na prática.
+        //
+        //   índice  pássaro     casa      papel
+        //     0     Mau         1100 Hz   o grave
+        //     1     uirapuru    1823 Hz   o do meio
+        //     2     bem-te-vi   2853 Hz   o agudo
+        //
+        // Com um pássaro só, o pior caso na faixa E2 a E6 era o canto tocando
+        // 2961 cents (24 semitons) abaixo de casa. Com os três e a regra de
+        // escolha abaixo, o pior caso cai pra 661 cents.
+        static constexpr int kPassaros = 3;
+        float casa_hz[kPassaros] = {1100.0f, 1823.0f, 2853.0f};
 
-        // Quantas oitavas acima da sua nota o pássaro canta. Em oitavas
-        // inteiras, então ele fica SEMPRE na mesma classe de nota que você está
-        // tocando, e nunca sai do tom. Fixado em 2, acima disso fica estranho.
-        //
-        // Cuidado: isto é o deslocamento PEDIDO, não o aplicado. O teto abaixo
-        // pode reduzir, e quando reduz o pássaro desce de oitava. Ou seja,
-        // subir o braço não garante pássaro mais agudo. Veja TargetCents().
-        int octave_offset = 2;
 
-        // Teto do pássaro, em Hz.
+        // O suavizador da transposição é ancorado num pássaro só, e os outros
+        // saem dele por um deslocamento constante. Um suavizador só garante que
+        // os três nunca se desencontrem, por mais que o alvo se mexa.
         //
-        // Descoberta importante: este sample só soa como pássaro quando puxado
-        // pra BAIXO. Subir estica o espectro pra uma faixa onde a gravação não
-        // tem energia, e o resultado fica fino e sibilante, é o que acontecia
-        // acima de A4.
+        // A âncora é o uirapuru, por dois motivos. Ele é o do meio, o que
+        // deixa os deslocamentos pequenos e simétricos. E ele era a referência
+        // única antes de existirem três, então a conta dele continua sendo um
+        // logaritmo só, sem o arredondamento de virar soma de dois. Medido:
+        // ancorar em outro pássaro mudava a saída do uirapuru em fração de
+        // cent, inaudível mas o bastante pra derrubar comparação exata.
+        static constexpr int kAncora = 1;
+
+        // Ganho de correção por pássaro, pra nenhum entrar mais forte que os
+        // outros. Dois conjuntos porque o valor depende do modo de disparo: no
+        // modo frase cada pássaro toca só os trechos que a segmentação marcou
+        // como canto, que são os mais fortes dele, e a média sobe.
         //
-        // Com o teto, quando o pássaro passaria daqui ele desce uma OCTAVA
-        // INTEIRA em vez de continuar subindo. Oitava inteira mantém a mesma
-        // classe de nota, então nunca sai do tom. 0 desliga o teto.
-        float ceiling_hz = 1850.0f;
+        // Descobrimos isso no bem-te-vi: os arquivos foram normalizados
+        // separadamente e ele entrava 11,5 dB mais alto que o uirapuru toda vez
+        // que era sorteado. Calibrado medindo o RMS da SAÍDA renderizada, não
+        // o do arquivo, porque a transposição muda a energia.
+        // Calibrados medindo o RMS da SAÍDA em sete notas de E2 a A4, com cada
+        // pássaro forçado, e igualando tudo ao uirapuru:
+        //
+        //             contínuo   frase
+        //   Mau         0,739    0,804    estava 2,6 dB acima
+        //   uirapuru    1,000    1,000    a referência
+        //   bem-te-vi   0,262    0,443    estava 11,5 dB acima
+        //
+        // O Mau precisa de mais correção que o bem-te-vi por duas razões: foi
+        // normalizado pra 0,98 de pico contra 0,324 do uirapuru, e o canto dele
+        // é contínuo, sem as pausas internas que os outros dois têm.
+        float ganho[kPassaros]       = {0.739f, 1.0f, 0.264f};  // contínuo
+        float ganho_frase[kPassaros] = {0.804f, 1.0f, 0.444f};  // modo frase
+
+        // --- COMO A ALTURA É ESCOLHIDA ------------------------------------
+        //
+        // Cada pássaro canta na oitava que o deixa MAIS PERTO DA CASA DELE:
+        //
+        //   K_i = round(log2(casa_i / nota))        oitavas, inteiro
+        //   alvo_i = nota * 2^K_i
+        //
+        // Duas propriedades saem disso, e as duas importam.
+        //
+        // Nunca desafina: K é inteiro, e oitava inteira não muda a classe da
+        // nota. O pássaro cai exatamente na nota que você tocou.
+        //
+        // E deforma o mínimo possível. Como K é o arredondamento, o canto nunca
+        // é esticado mais que meia oitava. Medido na varredura de E2 a E6, o
+        // pior caso é 214 cents, menos de dois semitons. Pra comparar, com alvo
+        // comum pros três o pior caso ia de 414 a 886 cents conforme o ajuste,
+        // e com um pássaro só chegava a 2961.
+        //
+        // O preço: como cada pássaro segue a própria casa, o alvo troca de
+        // oitava mais vezes ao longo do braço. Mas o pássaro em si quase não sai
+        // do registro dele, e é isso que o ouvido percebe.
+        //
+        // Viés em oitavas, somado ao K de cada pássaro. Zero é o mínimo
+        // esticamento, que é o padrão. Existe pra poder experimentar.
+        int octave_offset = 0;
+
+        // Oitava de referência do SORTEIO, que é coisa separada da altura.
+        //
+        // Com cada pássaro perto da própria casa, a distância de casa não
+        // diferencia mais ninguém: os três ficam dentro de meia oitava. Então o
+        // sorteio precisa de outra régua, e a régua é o registro em que você
+        // tocou: `nota * 2^oitava_registro` comparado com a casa de cada um.
+        //
+        // Separar as duas coisas é o que deixa o pedal ter as duas
+        // propriedades ao mesmo tempo: quem responde depende de onde você
+        // tocou, e como ele é transposto depende só de não deformar.
+        int oitava_registro = 2;
+
+        // --- PISO E TETO DO ALVO ------------------------------------------
+        //
+        // O alvo é `nota x 2^K`. Estes dois limites apertam o K pelos dois
+        // lados, pra que o alvo caia sempre perto da casa de algum pássaro.
+        //
+        // Por que os dois: a gravação só soa como pássaro perto da altura
+        // original. Empurrada pra cima fica fina e sibilante, porque o espectro
+        // estica pra uma faixa onde o arquivo não tem energia. Puxada demais
+        // pra baixo fica poluída. O teto trata uma ponta e o piso a outra.
+        //
+        // Os valores saíram de varredura. Com piso 550 e teto 4000:
+        //   - o alvo fica sempre dentro de 661 cents de alguma casa
+        //   - K continua em 2 em 34 dos 49 semitons do braço
+        //   - as duas quebras de monotonicidade caem em C#3 e C6. Antes o
+        //     pássaro descia uma oitava em A#4, que é região mais tocada
+        //
+        // Subir muito o piso força K=4 no grave e cria uma TERCEIRA quebra, o
+        // que é pior que os poucos cents que se ganharia.
+        //
+        // Desligados por padrão: com a oitava escolhida por pássaro, o alvo já
+        // fica perto de casa sozinho, e apertar mais só criaria salto de oitava
+        // sem ganho nenhum. Ficam disponíveis pra experimentar. 0 desliga.
+        float piso_hz = 0.0f;
+        float teto_hz = 0.0f;
 
         // O quanto o pássaro acompanha a dinâmica do seu toque.
         float dynamics = 1.0f;
 
-        // --- SEGUNDO PÁSSARO: o bem-te-vi ---------------------------------
+        // --- QUEM RESPONDE A CADA NOTA ------------------------------------
         //
-        // A cada nota que você toca é sorteado quem responde. A chance não é
-        // fixa: cresce conforme você sobe o braço, porque o bem-te-vi é +817
-        // cents mais agudo que o uirapuru e sofre menos ao ser transposto pra
-        // cima. No centro do braço (~C4) a chance dá justo 25%.
-        // O knob do plugin: o quanto o bem-te-vi aparece, 0..1, medido no
-        // CENTRO do braço (~269 Hz). Zero desliga ele por completo.
+        // O peso de cada pássaro cai conforme o alvo se afasta da casa dele:
         //
-        // Por que medir no centro: é ali que você passa a maior parte do tempo,
-        // então o número corresponde ao que o ouvido percebe como "quanto ele
-        // aparece". A inclinação por região se aplica em volta disso.
-        float bird2_chance = 0.125f;
+        //   d_i    = |1200 * log2(alvo / casa_i)|     distância em cents
+        //   peso_i = exp(-(d_i / sigma)^2)
+        //   sigma  = 40 + variedade * 900             cents
+        //
+        // Isto substituiu uma curva de inclinação desenhada à mão. O
+        // mapeamento por região cai como consequência, sem ninguém desenhar:
+        // Mau responde de E2 a C#4, uirapuru de E4 a C#5, bem-te-vi de E5 pra
+        // cima.
+        //
+        // A `variedade` é o único knob disso, e é o que o plugin expõe. Medido
+        // sobre o braço todo, quanto cada posição aparece:
+        //
+        //   variedade   dominante   segundo   terceiro
+        //        0%        100%        0%        0%
+        //       30%         96%        4%        0%
+        //       55%         88%       12%        0%
+        //      100%         73%       25%        3%
+        //
+        // Em 0% o pedal sempre escolhe o pássaro que vai soar melhor. O padrão
+        // de 55% dá ~12% de aparição do segundo, que é aproximadamente o que o
+        // knob antigo do bem-te-vi entregava.
+        float variedade = 0.55f;
 
-        // Altura mediana medida no sample do bem-te-vi.
-        float bird2_ref_hz = 2930.0f;
-
-        // Ganho de correção do bem-te-vi.
-        //
-        // Os dois arquivos foram normalizados separadamente, e as gravações
-        // têm densidades bem diferentes: o bem-te-vi é um grito curto e cheio,
-        // o uirapuru é um assobio fino. Medindo só as partes com som:
-        //
-        //             pico    RMS
-        //   uirapuru  0,324   -27,4 dBFS
-        //   bem-te-vi 0,980   -16,0 dBFS     +11,5 dB mais alto
-        //
-        // Ou seja: toda vez que o bem-te-vi era sorteado ele entrava quase
-        // quatro vezes mais forte. Isso estava aí desde que ele foi adicionado
-        // e é parte do motivo de ele parecer aparecer demais. Mexemos na
-        // probabilidade, mas o volume continuava desigual.
-        //
-        // Os valores foram calibrados na SAÍDA renderizada, não no arquivo:
-        // o bem-te-vi é transposto bem mais pra baixo, o que muda a energia
-        // dele. Medindo o RMS da saída em sete notas de E2 a A4, com cada
-        // pássaro forçado:
-        //
-        //   contínuo   bem-te-vi +11,6 dB  ->  ganho 0,262
-        //   frase      bem-te-vi  +7,1 dB  ->  ganho 0,443
-        //
-        // Os modos pedem valores diferentes porque no modo frase o uirapuru
-        // toca só os trechos que a segmentação marcou como canto, que são os
-        // mais fortes dele; no contínuo ele varre o arquivo inteiro, partes
-        // fracas incluídas, e a média cai.
-        //
-        // Confere: o 0,262 do contínuo bate com 1/3,74, a razão dos RMS dos
-        // dois arquivos. Duas medidas independentes chegando no mesmo número.
-        float bird2_gain       = 0.262f;  // contínuo
-        float bird2_gain_frase = 0.443f;  // frase
-
-        // Uma oitava extra só pro bem-te-vi.
-        //
-        // Como a referência dele é mais alta, na mesma nota ele seria puxado ~8
-        // semitons mais pra baixo que o uirapuru (em A3: -2085 contra -1266
-        // cents), o que pode sair grave demais. Subir uma oitava aproveita que
-        // ele é o pássaro agudo, e sendo oitava inteira, continua no tom.
-        int bird2_octave_bonus = 1;
-
-        // A inclinação por região: esta parte é CARACTERÍSTICA, não knob.
-        //
-        // Multiplicadores aplicados sobre bird2_chance: no grave ele aparece
-        // 40% do valor do knob, no agudo 160%. No centro vale exatamente 1,0,
-        // que é o que faz o knob significar o que diz.
-        //
-        // A inclinação existe porque o bem-te-vi é +817 cents mais agudo e
-        // sofre menos ao ser transposto pra cima, faz sentido ele aparecer
-        // mais quando você sobe o braço.
-        float bird2_tilt_lo = 0.40f;  // multiplicador em E2
-        float bird2_tilt_hi = 1.60f;  // multiplicador em A5
-        float chance_f_lo   = 82.41f; // E2
-        float chance_f_hi   = 880.0f; // A5
-
-        // Força um pássaro só, pra comparar de ouvido. 0 = sorteia normalmente.
-        int force_bird = 0;  // 1 = sempre uirapuru, 2 = sempre bem-te-vi
+        // Força um pássaro só, pra comparar de ouvido. 0 = sorteia normalmente,
+        // 1 = Mau, 2 = uirapuru, 3 = bem-te-vi.
+        int force_bird = 0;
     };
 
-    /** Inicializa com o sample principal (uirapuru).
+    /** Inicializa o motor. Os cantos entram depois, com SetBird().
      *
-     * O segundo pássaro é opcional: sem ele o motor funciona exatamente como
-     * antes. Chame SetSecondBird() depois pra ligar o sorteio.
+     * Separado porque a taxa de amostragem vem do host e os samples vêm de
+     * outro lugar (arquivo na linha de comando, dado embutido no plugin).
      */
-    void Init(float sample_rate, const float* bird, int bird_len);
+    void Init(float sample_rate);
 
-    /** Carrega o sample do segundo pássaro (bem-te-vi). */
-    void SetSecondBird(const float* bird, int bird_len);
-    bool has_second_bird() const { return !bird2_.empty(); }
+    /** Carrega o canto de um pássaro.
+     *
+     * O índice é o mesmo de Params::casa_hz: 0 = Mau, 1 = uirapuru,
+     * 2 = bem-te-vi. Pássaro sem sample carregado nunca é sorteado, então dá
+     * pra rodar com um, dois ou três.
+     */
+    void SetBird(int bird, const float* sample, int len);
+    bool has_bird(int bird) const;
+    int  bird_count() const;
     /** Troca os parâmetros.
      *
      * Seguro de chamar da thread de áudio: só refaz a segmentação das frases
@@ -269,29 +330,51 @@ class BirdEngine {
     /** Diagnóstico pra linha de comando. */
     float detected_hz() const { return pitch_.frequency(); }
     float confidence() const { return pitch_.confidence(); }
-    float transposition_cents() const { return cents_smooth_; }
+    float transposition_cents() const {
+        return (para_ >= 0 && para_ < Params::kPassaros)
+                   ? passaros_[para_].cents_smooth : 0.0f;
+    }
 
     /** Qual pássaro está tocando agora (pra conferir o sorteio). */
-    bool  on_second_bird() const { return want_bird2_; }
+    int   current_bird() const { return para_; }
     int   onset_count() const { return onsets_; }
-    int   bird2_count() const { return picks2_; }
-    float chance_now() const { return chance_now_; }
+    /** Quantas vezes cada pássaro foi sorteado, pro teste estatístico. */
+    int   pick_count(int bird) const {
+        return (bird >= 0 && bird < Params::kPassaros) ? picks_[bird] : 0;
+    }
+    /** Peso de cada pássaro no último ataque, 0..1. */
+    float weight_now(int bird) const {
+        return (bird >= 0 && bird < Params::kPassaros) ? peso_now_[bird] : 0.0f;
+    }
+    /** Frequência alvo absoluta agora, em Hz, e as oitavas aplicadas.
+     *
+     * Ao vivo, não o valor do último ataque. Os dois são diagnóstico, e o que
+     * interessa medir é o mapeamento da altura que está tocando.
+     */
+    float target_hz() const { return AlvoHz(para_, pitch_.stable_frequency()); }
+    int   octaves_now() const {
+        int k = 0;
+        AlvoHz(para_, pitch_.stable_frequency(), &k);
+        return k;
+    }
+    /** Alvo no instante do último ataque, que foi o que decidiu o sorteio.
+     *
+     * Difere do de cima na PRIMEIRA nota depois do silêncio: ali o detector
+     * ainda não assentou, então o sorteio cai no pássaro do meio, que é o que
+     * cobre a maior parte do braço. Da segunda nota em diante ele usa a altura
+     * da anterior, que costuma ser vizinha.
+     */
+    float target_at_onset() const { return alvo_now_; }
 
     /** Modo frase: ataques que chegaram com o pássaro ocupado e foram
      *  ignorados. É a medida de quanto o espaçamento está filtrando. */
     int   ignored_count() const { return ignorados_; }
     /** Modo frase: true enquanto uma chamada está no ar. */
     bool  singing() const { return cantando_; }
-    /** Quantas frases a segmentação achou em cada canto. */
-    int   phrase_count(int bird) const {
-        return (int)(bird == 2 ? frases2_.size() : frases_.size());
-    }
+    /** Quantas frases a segmentação achou no canto deste pássaro. */
+    int   phrase_count(int bird) const;
     /** Início e duração de uma frase, em amostras (pra conferência). */
-    void  phrase_at(int bird, int i, int& ini, int& len) const {
-        const std::vector<Frase>& f = (bird == 2 ? frases2_ : frases_);
-        ini = f[i].ini;
-        len = f[i].len;
-    }
+    void  phrase_at(int bird, int i, int& ini, int& len) const;
 
     /** Espiada no detector de ataque, só pra depuração. */
     float dbg_env() const { return on_fast_; }
@@ -336,10 +419,33 @@ class BirdEngine {
     /** Começa uma chamada: posiciona o granular na frase e abre o portão. */
     void ComecaChamada();
 
+    /** A frequência absoluta que o pássaro vai cantar, em Hz.
+     *
+     * É `nota x 2^K`, com K inteiro apertado pelo piso e pelo teto. Todos os
+     * pássaros miram o MESMO alvo: o que muda entre eles é só a distância até
+     * a casa de cada um. Isso é o que garante que a troca não desafine.
+     */
+    float AlvoHz(int bird, float played_hz, int* k_usado = nullptr) const;
+
+    /** Transposição deste pássaro pra esta nota, em cents contra a casa dele. */
+    float CentsDoPassaro(int bird, float played_hz) const;
+
+    /** A nota que manda na altura agora: a detectada, ou a travada. */
+    float AlturaEfetiva() const;
+
+    /** Transposição do pássaro 0, em cents, contra a casa dele.
+     *
+     * Só o pássaro 0 é suavizado. Os outros saem dele por um deslocamento
+     * constante (offset_), porque o alvo é comum. Um suavizador só garante que
+     * eles nunca se desencontrem, por mais que o alvo se mexa.
+     */
     float TargetCents(float played_hz) const;
 
-    /** Chance de o bem-te-vi responder a uma nota nesta altura, 0..1. */
-    float ChanceOfBird2(float played_hz) const;
+    /** Peso de cada pássaro pra esta nota, já normalizado (soma 1). */
+    void PesosDosPassaros(float played_hz, float* peso) const;
+
+    /** Sorteia qual pássaro responde, usando os pesos. */
+    int EscolhePassaro(float played_hz);
 
     /** Sorteio próprio (xorshift32).
      *
@@ -349,26 +455,38 @@ class BirdEngine {
      */
     float NextRandom();
 
-    uirapuru::GranularPlayer gran_;   // uirapuru
-    uirapuru::GranularPlayer gran2_;  // bem-te-vi
-    PitchTracker            pitch_;
-    std::vector<float>      bird_;
-    std::vector<float>      bird2_;
+    /** Tudo o que um pássaro carrega.
+     *
+     * Antes isto era um punhado de pares escritos à mão (gran_/gran2_,
+     * bird_/bird2_, frases_/frases2_). Com três pássaros aquilo viraria
+     * bagunça, e um quarto seria pior. Agrupado numa struct, somar pássaro
+     * passa a ser mexer no kPassaros e na tabela de casas.
+     */
+    struct Passaro {
+        uirapuru::GranularPlayer gran;
+        std::vector<float>       sample;
+        std::vector<Frase>       frases;
+        // Suavizador próprio. Cada pássaro tem um alvo diferente agora, então
+        // não dá mais pra ter um suavizador só com deslocamento fixo. São três
+        // filtros de um polo, custo irrelevante.
+        //
+        // Todos ficam atualizados o tempo todo, inclusive os que estão calados:
+        // assim, quando um é sorteado, ele já está na altura certa em vez de
+        // entrar deslizando de onde parou.
+        float                    cents_smooth = 0.0f;
+    };
+
+    Passaro      passaros_[Params::kPassaros];
+    PitchTracker pitch_;
 
     float sr_ = 48000.0f;
     Params p_;
 
-    float cents_smooth_ = 0.0f;
     float cents_coeff_  = 0.0f;
     float env_          = 0.0f;
     float env_atk_      = 0.0f;
     float env_rel_      = 0.0f;
     bool  have_pitch_   = false;
-
-    // Diferença constante de cents entre os dois pássaros. Como a frequência
-    // alvo é a mesma, basta um deslocamento fixo, assim eles nunca se
-    // desencontram. Calculado no Init.
-    float cents2_offset_ = 0.0f;
 
     // Altura congelada (modo TRAVA).
     //
@@ -381,8 +499,8 @@ class BirdEngine {
     // durante a janela de assentamento e só então congela. Assim não há atraso,
     // e a estabilidade vale onde importa: no corpo sustentado da nota, que é
     // onde o bend e o vibrato acontecem.
-    float latched_cents_ = 0.0f;
-    int   congela_em_    = 0;
+    float latched_hz_ = 0.0f;   // a NOTA travada, não mais os cents
+    int   congela_em_ = 0;
     bool  congelado_     = false;
 
     // --- Detecção de ataque -----------------------------------------------
@@ -406,14 +524,19 @@ class BirdEngine {
     float thresh_ = 0.0f, thresh_atk_ = 0.0f, thresh_rel_ = 0.0f;
     int   refract_ = 0;  // amostras restantes de bloqueio após um ataque
 
-    // Sorteio e crossfade entre os dois pássaros.
-    unsigned rng_        = 0x13579bdfu;
-    bool     want_bird2_ = false;
-    float    xfade_      = 0.0f;  // 0 = uirapuru, 1 = bem-te-vi
-    float    xfade_coeff_ = 0.0f;
+    // --- Sorteio e troca de pássaro ---------------------------------------
+    //
+    // A troca é sempre entre DOIS: o que estava tocando e o novo. Só isso é
+    // preciso, mesmo com três ou mais pássaros, porque o bloqueio entre
+    // ataques é de 80 ms e o crossfade leva 20, então uma troca sempre termina
+    // antes da próxima começar.
+    unsigned rng_ = 0x13579bdfu;
+    int   de_   = 1;             // pássaro que está saindo
+    int   para_ = 1;             // pássaro que está entrando (começa no uirapuru)
+    float xfade_ = 1.0f;         // 0 = de_, 1 = para_
+    float xfade_coeff_ = 0.0f;
 
     // --- Modo frase: chamada e descanso -----------------------------------
-    std::vector<Frase> frases_, frases2_;
     bool  cantando_       = false;
     int   canto_restante_ = 0;  // amostras que faltam da chamada
     int   descanso_       = 0;  // amostras que faltam de silêncio
@@ -425,8 +548,10 @@ class BirdEngine {
     float min_ms_usado_   = -1.0f;  // piso com que as frases foram cortadas
 
     // Contadores de diagnóstico (usados pelo teste estatístico).
-    int   onsets_     = 0;
-    int   ignorados_  = 0;
-    int   picks2_     = 0;
-    float chance_now_ = 0.0f;
+    int   onsets_    = 0;
+    int   ignorados_ = 0;
+    int   picks_[Params::kPassaros] = {0, 0, 0};
+    float peso_now_[Params::kPassaros] = {0.0f, 0.0f, 0.0f};
+    float alvo_now_ = 0.0f;
+    int   k_now_    = 0;
 };

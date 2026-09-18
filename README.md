@@ -27,34 +27,90 @@ inteira não muda a classe da nota, então o pássaro cai exatamente na nota que
 você tocou, algumas oitavas acima. Isso vale em toda a extensão do braço, sem
 exceção.
 
-### O `K` não é constante, e isso tem um preço
+### Cada pássaro escolhe a própria oitava
 
-O valor pedido é 2, mas o teto de 1850 Hz pode reduzir ele:
+O `K` não é um número fixo. Cada canto usa a oitava que o deixa **mais perto da
+casa dele**:
 
 ```
-K = min(2, floor(log2(1850 / f)))
+K_i    = round(log2(casa_i / nota))      oitavas, inteiro
+alvo_i = nota * 2^K_i
 ```
 
-Quando o pássaro passaria do teto, ele desce uma oitava inteira em vez de
-continuar subindo. Medindo a saída real, nota por nota:
+Duas propriedades saem daí, e as duas importam.
 
-| nota tocada | multiplicador | pássaro vai de |
+**Nunca desafina.** `K` é inteiro, e oitava inteira não muda a classe da nota.
+
+**Deforma o mínimo possível.** Como `K` é o arredondamento, o canto nunca é
+esticado mais que meia oitava. É isso que preserva o som original: transpor
+pouco é transpor sem destruir.
+
+Medido na varredura de E2 a E6, com o sorteio por registro aplicado:
+
+| desenho | deformação máxima | faixa da saída | saltos de oitava |
+|---|---|---|---|
+| **oitava por pássaro** | **586 cents** | 784 a 3951 Hz | 3 |
+| alvo comum pros três | 936 cents | 880 a 3136 Hz | 3 |
+| alvo comum, menos saltos | 1614 cents | 659 a 3136 Hz | 2 |
+| um pássaro só, como era antes | 2961 cents | 330 a 1760 Hz | 2 |
+
+O preço é que o alvo troca de oitava algumas vezes ao longo do braço, em G2, G3
+e C6. Mas o pássaro em si quase não sai do registro dele, e é isso que o ouvido
+percebe.
+
+`piso_hz` e `teto_hz` existem pra experimentar e vêm desligados: com a oitava
+por pássaro o alvo já cai perto de casa sozinho.
+
+## Os três pássaros
+
+Cada canto tem uma **casa**: a altura em que ele soa sem ser esticado.
+
+| pássaro | casa | papel |
 |---|---|---|
-| E2 a A4 | x4 | 330 a 1760 Hz |
-| A#4 a A5 | x2 | 932 a 1760 Hz |
-| A#5 pra cima | x1 | 932 Hz pra cima |
+| Mau | 1100 Hz | o grave |
+| uirapuru | 1823 Hz | o do meio |
+| bem-te-vi | 2853 Hz | o agudo |
 
-A consequência, dita sem rodeio: **subir o braço não garante pássaro mais agudo.**
-Em A#4 e de novo em A#5, você sobe um semitom e o pássaro cai onze. Dentro de
-cada faixa da tabela ele sobe junto com você, mas nas duas fronteiras ele volta.
+### Quem responde depende do registro, não da casa
 
-O teto existe porque a gravação só soa como pássaro quando puxada pra baixo.
-Acima dele o espectro estica pra uma faixa onde o arquivo quase não tem energia,
-e o som fica fino e sibilante. A escolha foi dobrar pra baixo em vez de ficar
-fino, e o custo é essa quebra.
+Com cada pássaro perto da própria casa, a distância de casa não diferencia mais
+ninguém: os três ficam dentro de meia oitava. Então o sorteio usa outra régua, o
+**registro em que você tocou**:
 
-`--no-ceiling` desliga o teto e o mapeamento passa a subir sempre, ao preço de
-trazer o som fino de volta nas notas agudas.
+```
+registro = nota * 2^2
+d_i      = |1200 * log2(registro / casa_i)|     distancia em cents
+peso_i   = exp(-(d_i / sigma)^2)
+sigma    = 40 + variedade * 900                 cents
+```
+
+Separar as duas coisas é o que deixa o pedal ter as duas propriedades ao mesmo
+tempo: **quem** responde depende de onde você tocou, e **como** ele é
+transposto depende só de não deformar.
+
+O mapeamento por região sai disso, sem ninguém desenhar curva. Medido com 400
+ataques por altura:
+
+| região tocada | quem responde |
+|---|---|
+| E2 a E4 | Mau |
+| A4 a C5 | uirapuru |
+| E5 pra cima | bem-te-vi |
+
+### Variedade
+
+O único controle disso. Em 0% sempre sai o pássaro mais perto de casa, que é o
+que soa melhor. Subindo, os vizinhos de região começam a aparecer. Medido:
+
+| variedade | dominante | segundo | terceiro |
+|---|---|---|---|
+| 0% | 100% | 0% | 0% |
+| 30% | 99% | 1% | 0% |
+| 55% | 91% | 9% | 0% |
+| 100% | 75% | 22% | 3% |
+
+Um pássaro sem sample carregado nunca é sorteado, então o motor roda com um,
+dois ou três cantos.
 
 ## Por que granular, e não um sampler
 
@@ -141,7 +197,10 @@ desafina junto com a guitarra.
 | `--octaves <n>` | oitavas acima da sua nota |
 | `--latch` / `--glide` / `--step` | como o pássaro reage a bend e slide |
 | `--calls` | modo frase: uma chamada inteira por ataque, depois descanso |
-| `--bird2 <wav>` | um segundo canto, sorteado por nota |
+| `--mau <wav>` | carrega o Mau, o pássaro grave |
+| `--bird2 <wav>` | carrega o bem-te-vi, o pássaro agudo |
+| `--variety <0..1>` | o quanto os pássaros se misturam |
+| `--floor <hz>` | abaixo daqui o alvo sobe uma oitava |
 
 ## Modo frase
 
@@ -213,7 +272,9 @@ decididos tocando:
 | fixo | valor | por quê |
 |---|---|---|
 | oitavas acima | 2 | acima disso fica estranho |
-| teto do pássaro | 1850 Hz | acima daqui ele desce uma oitava inteira em vez de ficar fino |
+| teto do alvo | 4000 Hz | acima daqui desce uma oitava, pro canto não ficar fino |
+| piso do alvo | 550 Hz | abaixo daqui sobe uma oitava, pro canto não ficar poluído |
+| as três casas | 1100, 1823, 2853 Hz | a altura em que cada canto não é esticado |
 | seguir a altura | sempre ligado | sem isso não existe efeito, é só um sample tocando |
 | altura em bends | trava | o pássaro prende na nota quando o detector assenta, por volta de 130 ms, e segura durante bend, slide e vibrato |
 | dinâmica | sempre no máximo | o pássaro respira junto com o toque |
@@ -224,10 +285,10 @@ fronteira do semitom. A trava acompanha ao vivo enquanto o detector assenta e
 então congela, então o pássaro fica estável exatamente onde importa: no corpo
 sustentado da nota. `--glide` e `--step` estão na linha de comando pra comparar.
 
-**Por que o teto existe.** A gravação só soa como pássaro quando puxada pra
-baixo. Subir estica o espectro pra uma faixa onde a gravação quase não tem
-energia, e o resultado fica fino e sibilante. Acima de 1850 Hz o pássaro desce
-uma oitava inteira, que mantém a mesma classe de nota e não sai do tom.
+**Por que existem piso e teto.** A gravação só soa como pássaro perto da altura
+original. Pra cima o espectro estica pra uma faixa onde o arquivo quase não tem
+energia e o som fica fino e sibilante; pra baixo demais fica poluído. Os dois
+limites mexem no K em oitavas inteiras, o que mantém a classe da nota.
 
 Esses valores moram em `BirdEngine::Params`, em
 [core/bird_engine.h](core/bird_engine.h), que é a fonte única. A linha de
@@ -239,12 +300,18 @@ ela é a bancada de teste, e foi com essas opções que a afinação foi conferi
 Cada número abaixo saiu de uma medição, não de impressão de ouvido.
 
 - Detector de altura: 8 de 8 notas de teste, de E2 a E5, dentro de 7 cents.
-- Transposição: 1200 cents por oitava **abaixo do teto**, medido de A2 a A4.
-  Passando o teto a conta muda, porque o pássaro dobra pra baixo: de A4 pra A5 o
-  deslocamento mede 10 cents, não 1200.
+- Transposição: exata por construção, `nota x 2^K` com K inteiro. Medido em 49
+  semitons, o desvio da oitava exata fica dentro da resolução da medida.
+- Os três pássaros pousam em alturas DIFERENTES, de propósito: cada um fica
+  perto da casa dele. É o que preserva o canto. Todos na classe de nota certa.
+- Nível casado entre os três dentro de 0,1 dB, em sete notas de E2 a A4.
+- Deformação do canto: pior caso 586 cents, contra 2961 com um pássaro só.
+  É o número que diz o quanto o canto é esticado, e é o que faz soar errado.
+- Refactor de dois pra três pássaros: configurado do jeito antigo, a saída é
+  **byte a byte idêntica** ao binário anterior em 8 de 8 entradas.
 - O mapeamento fica sempre no tom, em toda a extensão do braço.
-- O mapeamento **não** é monotônico: com o teto ligado o pássaro desce onze
-  semitons em A#4 e de novo em A#5. Medido, e é consequência conhecida do teto.
+- O mapeamento **não** é monotônico: o alvo desce uma oitava em G2, G3 e C6.
+  Medido, e é o preço de manter cada canto perto de casa.
 - O detector de altura satura perto de 1200 Hz. Acima disso ele trava no
   subharmônico, o que atinge só as últimas casas de um braço de 24 trastes.
 - Detecção de ataque: 400 ataques contados em 400 notas tocadas.
@@ -255,9 +322,10 @@ Cada número abaixo saiu de uma medição, não de impressão de ouvido.
   do ganho de correção do bem-te-vi entrar, e o ganho desequilibrou os dois
   modos de novo. Vale recalibrar antes de fechar o modo frase.
 - Segundo pássaro em zero: saída byte a byte idêntica a não ter segundo pássaro.
-- 112 combinações sob AddressSanitizer e UBSan, incluindo casos extremos de
-  espaçamento e velocidades de 0,02 a 2,0. Limpo.
-- Toda opção e comando da ajuda foram executados: 41 opções e 6 comandos.
+- 120 combinações sob AddressSanitizer e UBSan, incluindo limites
+  contraditórios (`--floor 4000 --ceiling 500`) e viés de oitava negativo.
+  Limpo.
+- Toda opção e comando da ajuda foram executados: 44 opções e 6 comandos.
 
 ## Estrutura
 
