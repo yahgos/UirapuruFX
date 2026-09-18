@@ -124,7 +124,7 @@ class BirdEngine {
         //
         // No modo FRASE o custo desaparece: o primeiro ataque começa a chamada
         // e todos os outros são ignorados enquanto ela toca. O portão engole os
-        // falsos positivos de graça. Medi de 18 a 28 ignorados por trecho, sem
+        // falsos positivos de graça. Medi até 28 ignorados por trecho, sem
         // nenhum efeito audível. É por isso que o par depende do modo, em vez
         // de ser um só valor de compromisso.
         float onset_env_rel_ms   = 40.0f;   // contínuo
@@ -142,8 +142,11 @@ class BirdEngine {
 
         // Quantas oitavas acima da sua nota o pássaro canta. Em oitavas
         // inteiras, então ele fica SEMPRE na mesma classe de nota que você está
-        // tocando (nunca sai do tom), e nota mais aguda sempre dá pássaro mais
-        // agudo. Fixado em 2, acima disso fica estranho.
+        // tocando, e nunca sai do tom. Fixado em 2, acima disso fica estranho.
+        //
+        // Cuidado: isto é o deslocamento PEDIDO, não o aplicado. O teto abaixo
+        // pode reduzir, e quando reduz o pássaro desce de oitava. Ou seja,
+        // subir o braço não garante pássaro mais agudo. Veja TargetCents().
         int octave_offset = 2;
 
         // Teto do pássaro, em Hz.

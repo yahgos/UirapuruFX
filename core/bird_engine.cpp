@@ -272,13 +272,23 @@ float BirdEngine::TargetCents(float played_hz) const {
         hz               = 440.0f * powf(2.0f, (midi - 69.0f) / 12.0f);
     }
 
-    // Canta a nota que você acabou de tocar, um número fixo de oitavas acima.
+    // Canta a nota que você acabou de tocar, algumas oitavas acima.
     //
-    // O detalhe de serem oitavas inteiras é o que importa: assim o pássaro fica
-    // exatamente na mesma classe de nota que a sua, e nunca sai do tom. E como
-    // o deslocamento é fixo em vez de dobrado dentro de um registro, nota mais
-    // aguda sempre dá pássaro mais agudo, não tem aquele efeito de voltar pra
-    // trás quando você sobe no braço.
+    // O detalhe de serem oitavas INTEIRAS é o que importa: assim o pássaro fica
+    // exatamente na mesma classe de nota que a sua, e nunca sai do tom. Isso
+    // vale em toda a extensão do braço, sem exceção.
+    //
+    // O que NÃO vale é o pássaro subir sempre junto com você. O teto reduz o
+    // deslocamento quando o alvo passaria dele, e aí o pássaro desce uma oitava
+    // inteira. Medido na saída real, com o teto em 1850 Hz:
+    //
+    //   E2 a A4       x4     pássaro de 330 a 1760 Hz
+    //   A#4 a A5      x2     pássaro de 932 a 1760 Hz
+    //   A#5 pra cima  x1     pássaro de 932 Hz pra cima
+    //
+    // Nas duas fronteiras você sobe um semitom e o pássaro cai onze. É o preço
+    // combinado: dobrar pra baixo em vez de ficar fino e sibilante. Quem quiser
+    // o mapeamento sempre subindo desliga o teto com ceiling_hz = 0.
     int k = p_.octave_offset;
     if(p_.ceiling_hz > 0.0f && hz > 0.0f)
     {
@@ -394,13 +404,20 @@ float BirdEngine::Process(float in) {
         // Janela de medida da força do toque, logo depois do disparo.
         if (mede_nivel_ > 0) {
             mede_nivel_--;
-            // O 0,70 casa o volume dos dois modos.
+            // O 0,70 aproxima o volume dos dois modos.
             //
             // No contínuo o pássaro desce junto com a nota que decai; na
             // chamada ele segura o nível do ataque até terminar de cantar, e
-            // por isso sai mais alto. Sem correção a diferença medida foi de
-            // 1,4x em nota solta e 2,5x em acorde, o bastante pra você achar
-            // que um modo é melhor só porque está mais forte.
+            // por isso sai mais alto. Sem nenhuma correção a diferença medida
+            // foi de 1,4x em nota solta e 2,5x em acorde, o bastante pra você
+            // achar que um modo é melhor só porque está mais forte.
+            //
+            // ATENÇÃO, este valor está desatualizado. Ele foi calibrado antes
+            // de bird2_gain existir, e o ganho separado por modo (0,262 contra
+            // 0,443) desequilibrou os dois de novo. Medindo hoje, o modo frase
+            // sai de 1,1 a 1,9 vezes mais alto conforme a entrada. Não mexi no
+            // número ainda porque isso muda o som, e o modo frase ainda não foi
+            // aprovado de ouvido.
             const float agora = 0.70f * (1.0f - p_.dynamics
                                 + p_.dynamics * fminf(on_fast_ * 6.0f, 1.0f));
             if (agora > nivel_canto_) nivel_canto_ = agora;

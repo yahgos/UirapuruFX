@@ -4,7 +4,7 @@ Um efeito de guitarra que responde ao que você toca com canto de pássaro.
 
 Você entrega uma gravação de canto. O efeito granula esse arquivo e transpõe o
 resultado pra acompanhar a nota que você acabou de tocar, misturando por baixo
-da guitarra seca. Nota mais aguda, pássaro mais agudo, sempre no tom.
+da guitarra seca, sempre no tom.
 
 O nome vem do uirapuru-verdadeiro (*Cyphorhinus arada*), o pássaro amazônico
 que Villa-Lobos usou no poema sinfônico de 1917.
@@ -14,21 +14,47 @@ plugin de Audio Unit e o firmware do pedal vêm depois.
 
 ## Como ele fica no tom
 
-O pássaro canta a nota que você tocou, duas oitavas acima.
-
-Duas propriedades saem disso, e as duas importam:
-
-- **Nunca sai do tom.** O deslocamento é um número inteiro de oitavas, então o
-  pássaro cai sempre na mesma classe de nota que a sua.
-- **É monotônico.** Como o deslocamento é fixo, nota mais aguda sempre dá
-  pássaro mais agudo, sem aquele efeito de sirene que volta pro começo.
-
-A conta é uma só. Para a nota detectada `f` e um deslocamento de `K` oitavas, a
-transposição em cents contra a altura de referência da gravação é:
+O pássaro canta a nota que você tocou, algumas oitavas acima. Para a nota
+detectada `f` e um deslocamento de `K` oitavas, a transposição em cents contra a
+altura de referência da gravação é:
 
 ```
 cents = 1200 * log2(f * 2^K / f_referencia)
 ```
+
+**O `K` é sempre um número inteiro, e é daí que vem o "sempre no tom".** Oitava
+inteira não muda a classe da nota, então o pássaro cai exatamente na nota que
+você tocou, algumas oitavas acima. Isso vale em toda a extensão do braço, sem
+exceção.
+
+### O `K` não é constante, e isso tem um preço
+
+O valor pedido é 2, mas o teto de 1850 Hz pode reduzir ele:
+
+```
+K = min(2, floor(log2(1850 / f)))
+```
+
+Quando o pássaro passaria do teto, ele desce uma oitava inteira em vez de
+continuar subindo. Medindo a saída real, nota por nota:
+
+| nota tocada | multiplicador | pássaro vai de |
+|---|---|---|
+| E2 a A4 | x4 | 330 a 1760 Hz |
+| A#4 a A5 | x2 | 932 a 1760 Hz |
+| A#5 pra cima | x1 | 932 Hz pra cima |
+
+A consequência, dita sem rodeio: **subir o braço não garante pássaro mais agudo.**
+Em A#4 e de novo em A#5, você sobe um semitom e o pássaro cai onze. Dentro de
+cada faixa da tabela ele sobe junto com você, mas nas duas fronteiras ele volta.
+
+O teto existe porque a gravação só soa como pássaro quando puxada pra baixo.
+Acima dele o espectro estica pra uma faixa onde o arquivo quase não tem energia,
+e o som fica fino e sibilante. A escolha foi dobrar pra baixo em vez de ficar
+fino, e o custo é essa quebra.
+
+`--no-ceiling` desliga o teto e o mapeamento passa a subir sempre, ao preço de
+trazer o som fino de volta nas notas agudas.
 
 ## Por que granular, e não um sampler
 
@@ -140,14 +166,14 @@ conta. Contando ataques numa corrida de 32 notas:
 
 | notas por segundo | 1 | 2 | 3 | 4 | 6 | 8 |
 |---|---|---|---|---|---|---|
-| detectados, modo contínuo | 32 | 24 | 1 | 1 | 1 | 1 |
-| detectados, modo frase | 32 | 32 | 32 | 32 | 32 | 32 |
+| com as constantes do modo contínuo (40 ms / 250 ms) | 32 | 24 | 1 | 1 | 1 | 1 |
+| com as constantes do modo frase (12 ms / 25 ms) | 32 | 32 | 32 | 32 | 32 | 32 |
 
 Acima de duas notas por segundo o detector do modo contínuo fica surdo, e o
 pássaro trava numa altura e zune pela corrida inteira. O modo frase usa um
 detector mais rápido, e pode se dar a esse luxo porque ali disparo falso não
-custa nada: o portão engole. De 18 a 28 ataques por trecho são ignorados sem
-nenhum efeito audível.
+custa nada: o portão engole. Até 28 ataques por trecho são ignorados sem nenhum
+efeito audível, dependendo do quanto você toca.
 
 O resultado é uma taxa de chamadas que quase não muda com a sua velocidade:
 
@@ -160,7 +186,17 @@ O resultado é uma taxa de chamadas que quase não muda com a sua velocidade:
 | corrida a 6 notas/s | 0,77 |
 | corrida a 8 notas/s | 0,77 |
 
-O tempo com o pássaro audível cai de 83 a 92% para 25 a 42%.
+O tempo com o pássaro audível cai por volta da metade. Medido na saída, com o
+pássaro isolado:
+
+| entrada | contínuo | frase |
+|---|---|---|
+| nota sustentada | 91% | 13% |
+| acorde aberto | 72% | 38% |
+| escala | 90% | 44% |
+| corrida a 3 notas/s | 85% | 52% |
+| corrida a 6 notas/s | 81% | 58% |
+| corrida a 8 notas/s | 78% | 39% |
 
 ### O que se perde
 
@@ -203,13 +239,21 @@ ela é a bancada de teste, e foi com essas opções que a afinação foi conferi
 Cada número abaixo saiu de uma medição, não de impressão de ouvido.
 
 - Detector de altura: 8 de 8 notas de teste, de E2 a E5, dentro de 7 cents.
-- Transposição: exatamente 1200 cents por oitava, e o pico dominante do áudio
-  renderizado mede 2,00 vezes por oitava.
-- O mapeamento é monotônico e sempre no tom.
+- Transposição: 1200 cents por oitava **abaixo do teto**, medido de A2 a A4.
+  Passando o teto a conta muda, porque o pássaro dobra pra baixo: de A4 pra A5 o
+  deslocamento mede 10 cents, não 1200.
+- O mapeamento fica sempre no tom, em toda a extensão do braço.
+- O mapeamento **não** é monotônico: com o teto ligado o pássaro desce onze
+  semitons em A#4 e de novo em A#5. Medido, e é consequência conhecida do teto.
+- O detector de altura satura perto de 1200 Hz. Acima disso ele trava no
+  subharmônico, o que atinge só as últimas casas de um braço de 24 trastes.
 - Detecção de ataque: 400 ataques contados em 400 notas tocadas.
 - Segmentação de frases: confere com uma ferramenta de medida independente.
-- Modo frase: nenhuma descontinuidade amostra a amostra, e níveis dentro de 8%
-  do modo contínuo.
+- Modo frase: nenhuma descontinuidade amostra a amostra em nenhum render.
+- Modo frase soa mais alto que o contínuo, de 1,1 a 1,9 vezes conforme o que
+  você toca. Isso não é proposital: a constante de casamento foi calibrada antes
+  do ganho de correção do bem-te-vi entrar, e o ganho desequilibrou os dois
+  modos de novo. Vale recalibrar antes de fechar o modo frase.
 - Segundo pássaro em zero: saída byte a byte idêntica a não ter segundo pássaro.
 - 112 combinações sob AddressSanitizer e UBSan, incluindo casos extremos de
   espaçamento e velocidades de 0,02 a 2,0. Limpo.
