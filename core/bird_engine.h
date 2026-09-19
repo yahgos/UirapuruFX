@@ -352,6 +352,20 @@ class BirdEngine {
      * pra rodar com um, dois ou três.
      */
     void SetBird(int bird, const float* sample, int len);
+
+    /** Carrega um canto SEM copiar e SEM segmentar.
+     *
+     * Existe pro firmware. La' os cantos ja' estao na memoria, nao ha heap pros
+     * 3 MB de copia, e `SegmentaFrases` alocaria mais um buffer do tamanho do
+     * sample so' pro envelope. Entao o firmware passa o ponteiro e a tabela de
+     * frases ja' pronta, calculada no desktop pelo comando `phrases`.
+     *
+     * Com `n_frases` igual a zero, o canto inteiro vira uma frase so'.
+     */
+    void SetBirdStatic(int bird, const float* sample, int len,
+                       const int* frase_ini = nullptr,
+                       const int* frase_len = nullptr,
+                       int n_frases = 0);
     bool has_bird(int bird) const;
     int  bird_count() const;
     /** Troca os parâmetros.
@@ -518,7 +532,17 @@ class BirdEngine {
      */
     struct Passaro {
         uirapuru::GranularPlayer gran;
-        std::vector<float>       sample;
+
+        // O canto, como PONTEIRO e tamanho.
+        //
+        // Nao e' um vector direto porque no firmware nao existe heap pros 3 MB
+        // dos tres cantos: la' eles moram numa area estatica na SDRAM e o motor
+        // so' aponta. No desktop o vector abaixo e' quem guarda, e `dados`
+        // aponta pra ele. Os dois caminhos usam o mesmo codigo depois disto.
+        const float*             dados = nullptr;
+        int                      n     = 0;
+        std::vector<float>       proprio;   // so' quando o motor e' o dono
+
         std::vector<Frase>       frases;
         // Suavizador próprio. Cada pássaro tem um alvo diferente agora, então
         // não dá mais pra ter um suavizador só com deslocamento fixo. São três

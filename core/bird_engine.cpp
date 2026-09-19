@@ -91,7 +91,7 @@ int BirdEngine::SorteiaFrase(int bird)
 void BirdEngine::ComecaChamada()
 {
     Passaro& pa = passaros_[para_];
-    if(pa.frases.empty() || pa.sample.empty()) return;
+    if(pa.frases.empty() || pa.dados == nullptr) return;
 
     const int i = SorteiaFrase(para_);
     frase_ant_  = i;
@@ -104,7 +104,7 @@ void BirdEngine::ComecaChamada()
 
     // Aponta o granular pro trecho. O size dele passa a ser o da frase, então
     // uma volta do fasor de posição é exatamente uma passada pela frase.
-    pa.gran.Restart(const_cast<float*>(pa.sample.data()) + pa.frases[i].ini, len);
+    pa.gran.Restart(const_cast<float*>(pa.dados) + pa.frases[i].ini, len);
 
     // Quanto tempo de saída isso dá: a frase tem len amostras de arquivo e é
     // lida a `speed`, então demora len/speed. Com speed < 1 estica.
@@ -138,7 +138,7 @@ void BirdEngine::phrase_at(int bird, int i, int& ini, int& len) const
 
 bool BirdEngine::has_bird(int bird) const
 {
-    return bird >= 0 && bird < Params::kPassaros && !passaros_[bird].sample.empty();
+    return bird >= 0 && bird < Params::kPassaros && passaros_[bird].dados != nullptr;
 }
 
 int BirdEngine::bird_count() const
@@ -174,7 +174,9 @@ void BirdEngine::Init(float sample_rate) {
 
     for(int i = 0; i < Params::kPassaros; i++)
     {
-        passaros_[i].sample.clear();
+        passaros_[i].proprio.clear();
+        passaros_[i].dados = nullptr;
+        passaros_[i].n     = 0;
         passaros_[i].frases.clear();
         passaros_[i].cents_smooth = 0.0f;
     }
@@ -228,8 +230,10 @@ void BirdEngine::SetParams(const Params& p)
     if(piso_mudou)
     {
         for(int i = 0; i < Params::kPassaros; i++)
-            if(!passaros_[i].sample.empty())
-                SegmentaFrases(passaros_[i].sample, sr_, p_.frase_min_ms,
+            // So' re-segmenta quem o motor copiou. Canto estatico traz a
+            // tabela pronta de fora, e re-segmentar exigiria alocar.
+            if(!passaros_[i].proprio.empty())
+                SegmentaFrases(passaros_[i].proprio, sr_, p_.frase_min_ms,
                                passaros_[i].frases);
         min_ms_usado_ = p_.frase_min_ms;
         frase_ant_    = -1;
@@ -241,13 +245,47 @@ void BirdEngine::SetBird(int bird, const float* sample, int len)
     if(bird < 0 || bird >= Params::kPassaros || sample == nullptr || len <= 0) return;
 
     Passaro& pa = passaros_[bird];
-    pa.sample.assign(sample, sample + len);
-    pa.gran.Init(pa.sample.data(), (int)pa.sample.size(), sr_);
-    SegmentaFrases(pa.sample, sr_, p_.frase_min_ms, pa.frases);
+    pa.proprio.assign(sample, sample + len);
+    pa.dados = pa.proprio.data();
+    pa.n     = (int)pa.proprio.size();
+    pa.gran.Init(const_cast<float*>(pa.dados), pa.n, sr_);
+    SegmentaFrases(pa.proprio, sr_, p_.frase_min_ms, pa.frases);
     min_ms_usado_ = p_.frase_min_ms;
 
 
     // Se o pássaro que estava selecionado não tem sample, cai pra este.
+    if(!has_bird(para_)) { de_ = para_ = bird; xfade_ = 1.0f; }
+}
+
+void BirdEngine::SetBirdStatic(int bird, const float* sample, int len,
+                               const int* frase_ini, const int* frase_len,
+                               int n_frases)
+{
+    if(bird < 0 || bird >= Params::kPassaros || sample == nullptr || len <= 0) return;
+
+    Passaro& pa = passaros_[bird];
+    pa.proprio.clear();
+    pa.proprio.shrink_to_fit();   // devolve o heap, se o motor tinha copiado antes
+    pa.dados = sample;
+    pa.n     = len;
+    pa.gran.Init(const_cast<float*>(pa.dados), pa.n, sr_);
+
+    pa.frases.clear();
+    if(frase_ini != nullptr && frase_len != nullptr && n_frases > 0)
+    {
+        for(int i = 0; i < n_frases; i++)
+        {
+            // Descarta entrada que aponte pra fora do canto: tabela vinda de
+            // fora pode estar desencontrada do arquivo.
+            if(frase_ini[i] < 0 || frase_len[i] <= 0) continue;
+            if(frase_ini[i] + frase_len[i] > len) continue;
+            pa.frases.push_back({frase_ini[i], frase_len[i]});
+        }
+    }
+    // Sem tabela utilizável, o canto inteiro vira uma frase só. O modo frase
+    // nunca pode ficar mudo.
+    if(pa.frases.empty()) pa.frases.push_back({0, len});
+
     if(!has_bird(para_)) { de_ = para_ = bird; xfade_ = 1.0f; }
 }
 
@@ -385,8 +423,8 @@ void BirdEngine::Retrigger() {
     for(int i = 0; i < Params::kPassaros; i++)
     {
         Passaro& pa = passaros_[i];
-        if(!pa.sample.empty())
-            pa.gran.Restart(pa.sample.data(), (int)pa.sample.size());
+        if(pa.dados != nullptr)
+            pa.gran.Restart(const_cast<float*>(pa.dados), pa.n);
     }
     cantando_       = false;
     canto_restante_ = 0;
@@ -621,7 +659,7 @@ float BirdEngine::Process(float in) {
     // roda, então o custo de CPU normal é o de um granular, não de três.
     auto voz = [&](int i) -> float {
         Passaro& pa = passaros_[i];
-        if (pa.sample.empty()) return 0.0f;
+        if (pa.dados == nullptr) return 0.0f;
         const float g = modo_frase ? p_.ganho_frase[i] : p_.ganho[i];
         return g * pa.gran.Process(p_.speed, pa.cents_smooth, grain);
     };
