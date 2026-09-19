@@ -83,8 +83,51 @@ class BirdEngine {
         //     acompanhar cada nota: ele escolhe uma, canta a frase inteira
         //     naquela altura, e descansa. O piso de ~110 ms do detector deixa
         //     de importar, porque ele não decide mais nota por nota.
-        enum ModoDisparo { CONTINUO = 0, FRASE = 1 };
+        // ACORDE troca QUEM PUXA O GATILHO, e mais nada. Em vez do detector de
+        // ataque, que reage a amplitude e por isso dispara a cada batida, ele
+        // dispara quando a HARMONIA muda.
+        //
+        // O problema que ele resolve, medido numa levada de carimbó de 100 bpm
+        // com 24 batidas e 4 acordes em 11,1 s: o modo contínuo toma 16
+        // decisões, uma a cada 0,7 s, e cada uma re-sorteia o pássaro e
+        // destrava a altura. É isso que faz acorde soar como vários sons.
+        //
+        // Disparos no modo acorde, sobre as mesmas leituras:
+        //
+        //   E aberto batido 4 vezes      8 ataques  ->  1 disparo
+        //   A menor batido 4 vezes       5 ataques  ->  1 disparo
+        //   a levada de 4 acordes       16 ataques  ->  4 disparos
+        //   escala de 10 notas          10 ataques  -> 10 disparos
+        //
+        // A escala continuar em 10 é o comportamento certo: dez notas
+        // diferentes são dez harmonias diferentes.
+        //
+        // Por que a altura não precisa de tratamento especial: o pássaro
+        // transpõe em oitavas INTEIRAS, então qualquer nota do acorde que o
+        // detector encontre resulta numa classe de nota que está no acorde. Na
+        // levada inteira, 93% das leituras caem dentro do acorde, e as que
+        // erram são filtradas de graça pela exigência de estabilidade.
+        enum ModoDisparo { CONTINUO = 0, FRASE = 1, ACORDE = 2 };
         int modo_disparo = CONTINUO;
+
+        // Quanto tempo a classe de nota precisa ficar firme antes de contar
+        // como acorde novo.
+        //
+        // É também o atraso da resposta, e ele é inerente: não dá pra saber
+        // qual é o acorde antes de ouvir o acorde. Na levada isso cai como
+        // resposta à harmonia, não como reação à batida.
+        //
+        // Medido: com janela curta o detector disparou uma vez a mais, num A#
+        // que nem estava no acorde tocado. Com 400 ms ficou limpo.
+        float acorde_estavel_ms = 400.0f;
+
+        // TEMPORÁRIO, existe só pro A/B de ouvido.
+        //
+        // true  = trocou de acorde, o pássaro canta uma frase e cala
+        // false = o pássaro canta sem parar, e só muda quando o acorde muda
+        //
+        // Depois da escolha, um dos dois caminhos sai do código.
+        bool acorde_com_frase = true;
 
         // Quanto silêncio entre o fim de uma chamada e a próxima poder
         // disparar. O padrão sai da medição do próprio arquivo: as pausas do
@@ -447,6 +490,17 @@ class BirdEngine {
     /** Sorteia qual pássaro responde, usando os pesos. */
     int EscolhePassaro(float played_hz);
 
+    /** Detector de troca de harmonia, o gatilho do modo acorde.
+     *
+     * Devolve true no instante em que a classe de nota estável muda. Batida
+     * repetida do mesmo acorde não muda a classe, então não dispara.
+     *
+     * Compara CLASSE e não frequência de propósito: o mesmo acorde batido de
+     * novo pode dar E2 numa vez e E3 na outra conforme qual corda soou mais
+     * forte, e as duas são a mesma harmonia.
+     */
+    bool TrocouDeAcorde(bool leitura_nova);
+
     /** Sorteio próprio (xorshift32).
      *
      * Não usamos rand(): ele tem estado global e não é seguro de chamar da
@@ -523,6 +577,25 @@ class BirdEngine {
     float on_fast_atk_ = 0.0f, on_fast_rel_ = 0.0f;
     float thresh_ = 0.0f, thresh_atk_ = 0.0f, thresh_rel_ = 0.0f;
     int   refract_ = 0;  // amostras restantes de bloqueio após um ataque
+
+    // --- Modo acorde: detector de troca de harmonia -----------------------
+    //
+    // Guarda as classes de nota das últimas leituras e usa a MAIS FREQUENTE,
+    // não a última nem "a mesma N vezes seguidas".
+    //
+    // Exigir classe constante não funcionou: medido num E aberto de 6 cordas
+    // dentro de uma levada, o detector treme entre A, C e E várias vezes por
+    // segundo, e a exigência quase nunca era satisfeita. A levada de 4 acordes
+    // disparava 2 vezes em vez de 4.
+    //
+    // A moda ignora o tremor: as leituras erradas são minoria e não mudam qual
+    // classe domina a janela.
+    static constexpr int kJanelaAcorde = 64;   // leituras guardadas
+    int   ring_classe_[kJanelaAcorde] = {0};
+    int   conta_classe_[12] = {0};
+    int   ring_w_       = 0;    // onde escrever no anel
+    int   ring_n_       = 0;    // quantas leituras válidas já entraram
+    int   classe_firme_ = -1;   // a que está segurando o pássaro
 
     // --- Sorteio e troca de pássaro ---------------------------------------
     //

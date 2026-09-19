@@ -2,15 +2,16 @@
 build/
 build-*/
 
-# Renders e amostras de audio ficam fora do repositorio: sao grandes e a
-# licenca de cada gravacao depende de onde ela veio.
-*.wav
+# Renders sao saida, nao fonte: da' pra regerar qualquer um com um comando.
+renders/
+
+# Os cantos em assets/ SAO versionados, de proposito: sem eles a linha de
+# comando nao roda de um clone limpo. A atribuicao de cada um esta em
+# CREDITOS.md. Qualquer outro audio solto fica de fora.
 *.aif
 *.aiff
 *.mp3
 *.flac
-renders/
-assets/
 
 # macOS
 .DS_Store

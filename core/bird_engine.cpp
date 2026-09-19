@@ -194,6 +194,10 @@ void BirdEngine::Init(float sample_rate) {
     for(int i = 0; i < Params::kPassaros; i++) { picks_[i] = 0; peso_now_[i] = 0.0f; }
     alvo_now_ = 0.0f;
     k_now_    = 0;
+    classe_firme_ = -1;
+    ring_w_ = ring_n_ = 0;
+    for(int i = 0; i < 12; i++) conta_classe_[i] = 0;
+    for(int i = 0; i < kJanelaAcorde; i++) ring_classe_[i] = 0;
     cantando_       = false;
     canto_restante_ = 0;
     descanso_       = 0;
@@ -303,6 +307,54 @@ void BirdEngine::PesosDosPassaros(float played_hz, float* peso) const
     for(int i = 0; i < Params::kPassaros; i++) peso[i] /= soma;
 }
 
+bool BirdEngine::TrocouDeAcorde(bool leitura_nova)
+{
+    // Só mexe no histórico quando chega leitura nova do detector de altura.
+    // Contar amostra a amostra encheria a janela com a mesma leitura repetida.
+    if(!leitura_nova) return false;
+
+    const float hz = (p_.pitch_follow && have_pitch_) ? pitch_.stable_frequency() : 0.0f;
+    if(hz <= 0.0f) return false;
+
+    // Classe de nota, 0 a 11. Comparar CLASSE e não frequência é o ponto: o
+    // mesmo acorde batido de novo pode dar E2 numa vez e E3 na outra conforme
+    // qual corda soou mais forte, e as duas são a mesma harmonia.
+    const float midi = 69.0f + 12.0f * log2f(hz / 440.0f);
+    int c = ((int)lroundf(midi)) % 12;
+    if(c < 0) c += 12;
+
+    // Quantas leituras cabem na janela pedida. O detector entrega uma a cada
+    // hop, e o hop é kHop amostras dizimadas.
+    int janela = (int)(p_.acorde_estavel_ms * 0.001f * sr_ / 512.0f);
+    if(janela < 2) janela = 2;
+    if(janela > kJanelaAcorde) janela = kJanelaAcorde;
+
+    // Anel: tira a mais antiga quando a janela enche, põe a nova.
+    if(ring_n_ >= janela)
+    {
+        const int velha = ring_classe_[(ring_w_ - janela + kJanelaAcorde * 2) % kJanelaAcorde];
+        if(conta_classe_[velha] > 0) conta_classe_[velha]--;
+    }
+    else ring_n_++;
+    ring_classe_[ring_w_] = c;
+    conta_classe_[c]++;
+    ring_w_ = (ring_w_ + 1) % kJanelaAcorde;
+
+    if(ring_n_ < janela) return false;
+
+    // A classe que domina a janela.
+    int dom = 0;
+    for(int i = 1; i < 12; i++) if(conta_classe_[i] > conta_classe_[dom]) dom = i;
+
+    // Exige maioria de verdade, não só o maior monte. Sem isto, tremor entre
+    // três classes elegeria qualquer uma delas com um terço dos votos.
+    if(conta_classe_[dom] * 2 <= janela) return false;
+
+    if(dom == classe_firme_) return false;
+    classe_firme_ = dom;
+    return true;
+}
+
 int BirdEngine::EscolhePassaro(float played_hz)
 {
     // Força um pássaro só, pra comparar de ouvido. 1..3 na linha de comando
@@ -403,7 +455,8 @@ float BirdEngine::Process(float in) {
     // Controla o pássaro pela mediana das leituras confiáveis recentes, não
     // pela estimativa crua de cada quadro. Em acorde um detector monofônico
     // fica pulando entre as notas; sem isso o pássaro iria junto no tranco.
-    if (pitch_.Process(in)) {
+    const bool leitura_nova = pitch_.Process(in);
+    if (leitura_nova) {
         if (pitch_.stable_ready() && pitch_.stable_frequency() > 0.0f) {
             have_pitch_ = true;
         }
@@ -452,14 +505,28 @@ float BirdEngine::Process(float in) {
     const bool alto    = on_fast_ > 0.015f;
     const bool subindo = on_fast_ > thresh_ * 1.30f;
 
-    const bool modo_frase = (p_.modo_disparo == Params::FRASE);
+    const bool modo_acorde = (p_.modo_disparo == Params::ACORDE);
+    // O modo acorde também toca a chamada e descansa, se for esse o jeito de
+    // responder escolhido. A máquina é a mesma; o que muda é o gatilho.
+    const bool usa_chamada = (p_.modo_disparo == Params::FRASE) ||
+                             (modo_acorde && p_.acorde_com_frase);
+    const bool modo_frase  = usa_chamada;
 
-    // No modo frase o pássaro não atende enquanto está cantando nem enquanto
-    // descansa. É isso que dá o espaçamento: o ataque chega, e é ignorado.
-    const bool ocupado = modo_frase && (cantando_ || descanso_ > 0);
+    // O gatilho. No modo acorde é a troca de harmonia; nos outros, o ataque.
+    //
+    // A troca de harmonia precisa ser consultada TODA amostra, porque o
+    // contador de estabilidade dela anda em amostras.
+    const bool trocou = modo_acorde ? TrocouDeAcorde(leitura_nova) : false;
+    const bool gatilho = modo_acorde
+                             ? trocou
+                             : (refract_ == 0 && alto && subindo);
 
-    if (refract_ == 0 && alto && subindo) {
-        refract_ = (int)(0.080f * sr_);
+    // Enquanto canta ou descansa o pássaro não atende. É isso que dá o
+    // espaçamento: o gatilho chega, e é ignorado.
+    const bool ocupado = usa_chamada && (cantando_ || descanso_ > 0);
+
+    if (gatilho) {
+        if (!modo_acorde) refract_ = (int)(0.080f * sr_);
 
         if (ocupado) {
             ignorados_++;

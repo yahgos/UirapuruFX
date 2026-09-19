@@ -1,16 +1,30 @@
 # UirapuruFX
 
-Um efeito de guitarra que responde ao que você toca com canto de pássaro.
+Um transpositor granular que segue a nota que você toca, esticando o sample o
+mínimo possível.
 
-Você entrega uma gravação de canto. O efeito granula esse arquivo e transpõe o
-resultado pra acompanhar a nota que você acabou de tocar, misturando por baixo
-da guitarra seca, sempre no tom.
+Você entrega qualquer gravação. O efeito granula esse arquivo, o que separa
+velocidade de altura, e transpõe o resultado pra acompanhar a nota tocada,
+misturando por baixo do sinal seco. A transposição é sempre em **oitavas
+inteiras**, então nunca desafina, e cada sample toca na oitava mais perto da
+altura natural dele, então nunca é esticado além de meia oitava.
 
-O nome vem do uirapuru-verdadeiro (*Cyphorhinus arada*), o pássaro amazônico
-que Villa-Lobos usou no poema sinfônico de 1917.
+Nada disso é sobre pássaro. Pássaro é o que eu carreguei nele.
 
-Este repositório tem o motor de DSP e o renderizador de linha de comando. O
-plugin de Audio Unit e o firmware do pedal vêm depois.
+## A demonstração: três cantos
+
+Os samples que eu uso são de pássaros, e é daí que vem o nome. O
+uirapuru-verdadeiro (*Cyphorhinus arada*) é o pássaro amazônico do poema
+sinfônico de Villa-Lobos de 1917.
+
+O motor carrega três gravações, escolhe qual responde conforme o registro em
+que você tocou, e transpõe cada uma perto da altura natural dela. Trocar os
+três arquivos por flautas, vozes ou gravação de campo muda o instrumento sem
+mudar uma linha de código.
+
+Este repositório tem o motor e o renderizador de linha de comando. O plugin de
+Audio Unit e o firmware do pedal são projetos separados, justamente pra que o
+motor sirva a outras coisas.
 
 ## Como ele fica no tom
 
@@ -140,9 +154,10 @@ make asan
 
 ## Usar
 
-O efeito precisa de uma gravação de canto de pássaro. O repositório não traz
-nenhuma: gravação tem licença, e a licença depende de onde o arquivo veio.
-Consiga a sua e aponte o caminho.
+Os três cantos vêm em `assets/`, então isto roda logo depois do clone. A
+atribuição de cada um está em [CREDITOS.md](CREDITOS.md).
+
+Qualquer outro WAV mono serve no lugar deles.
 
 O que o arquivo precisa ter:
 
@@ -159,10 +174,11 @@ licença declarada em cada gravação. Confira a licença da que você baixar.
 Com o arquivo em mão:
 
 ```sh
-PASSARO=caminho/pro/canto.wav
+PASSARO=assets/uirapuru.wav
 
 # Com uma gravação sua de guitarra:
-./build/uirapuru render $PASSARO guitarra.wav saida.wav --mix 0.55
+./build/uirapuru render $PASSARO guitarra.wav saida.wav --mix 0.55 \
+  --mau assets/mau.wav --bird2 assets/kiskadee.wav
 
 # Com uma escala sintética, se ainda não tem gravação de guitarra:
 ./build/uirapuru render $PASSARO --synth saida.wav --mix 0.55

@@ -38,7 +38,7 @@ void usage() {
         "  --chord <nome>      e5|emaj|eopen|amopen|ce|note\n"
         "  --progression       nota -> power chord -> acorde aberto -> nota\n"
         "  --climb             sobe de E3 ate D6, mostra o teto agindo\n"
-        "  --solo <nps>        corrida rapida a N notas por segundo\n"
+        "  --solo <nps>        corrida rapida a N notas por segundo\n"        "  --strum <bpm>       levada com troca de acorde (Am Dm E Am)\n"
         "  --bend <semis>      uma nota puxada N semitons, testa slide e bend\n"
         "\ncontroles do pedal:\n"
         "  --mix <0..1>        guitarra seca contra passaro (padrao 0,5)\n"
@@ -56,6 +56,9 @@ void usage() {
         "  --step              comportamento antigo: pula de semitom em semitom\n"
         "\nmodo frase (uma chamada por ataque, depois descanso):\n"
         "  --calls             uma frase inteira por ataque, depois silencio\n"
+        "  --chords            responde por ACORDE, nao por batida\n"
+        "  --chord-stable <ms> quanto a harmonia precisa firmar (padrao 400)\n"
+        "  --chord-hold        no modo acorde, canto continuo em vez de frase\n"
         "  --continuous        o passaro canta sem parar (padrao)\n"
         "  --rest <ms>         descanso entre chamadas (padrao 400)\n"
         "  --call-max <ms>     teto de uma chamada, medido no arquivo (padrao 1500)\n"
@@ -376,6 +379,7 @@ int main(int argc, char** argv) {
     std::string chord_name;
     bool progression = false;
     bool climb = false;
+    float strum_bpm = 0.0f;
     float solo_nps = 0.0f;
     float bend_semis = 0.0f;
     std::string bird2_path, mau_path;
@@ -394,6 +398,7 @@ int main(int argc, char** argv) {
         else if (a == "--chord")        { synth = true; chord_name = next(); }
         else if (a == "--progression")  { synth = true; progression = true; }
         else if (a == "--climb")        { synth = true; climb = true; }
+        else if (a == "--strum")        { synth = true; strum_bpm = arg_f(next()); }
         else if (a == "--solo")         { synth = true; solo_nps = arg_f(next()); }
         else if (a == "--bend")         { synth = true; bend_semis = arg_f(next()); }
         else if (a == "--bird-rate")    bird_rate = atoi(next());
@@ -411,6 +416,9 @@ int main(int argc, char** argv) {
         else if (a == "--step")         p.modo_altura = BirdEngine::Params::DEGRAU;
         else if (a == "--calls")       p.modo_disparo = BirdEngine::Params::FRASE;
         else if (a == "--continuous")     p.modo_disparo = BirdEngine::Params::CONTINUO;
+        else if (a == "--chords")         p.modo_disparo = BirdEngine::Params::ACORDE;
+        else if (a == "--chord-stable" && i + 1 < argc) p.acorde_estavel_ms = atof(argv[++i]);
+        else if (a == "--chord-hold")     p.acorde_com_frase = false;
         else if (a == "--rest" && i + 1 < argc)    p.espaco_ms = atof(argv[++i]);
         else if (a == "--call-max" && i + 1 < argc) p.frase_max_ms = atof(argv[++i]);
         else if (a == "--call-min" && i + 1 < argc) p.frase_min_ms = atof(argv[++i]);
@@ -496,6 +504,33 @@ int main(int argc, char** argv) {
                 // nota dura 90% do passo, pra ficar um respiro entre ataques
                 add_chord(guitar.samples, sr, 0.1f + i * passo, passo * 0.9f, one, 1);
             }
+        } else if (strum_bpm > 0.0f) {
+            // Levada com troca de acorde, pra testar o modo acorde.
+            //
+            // Precisa existir dentro do projeto: sem ela nao da' pra verificar
+            // que batida repetida do mesmo acorde gera UMA resposta so'. As
+            // entradas de acorde que ja' existiam batem sempre o mesmo acorde,
+            // entao nao exercitam a troca de harmonia.
+            const float col = 60.0f / strum_bpm / 2.0f;   // colcheia
+            struct Levada { int n; float f[6]; };
+            const Levada prog[4] = {
+                {5, {110.0f, 164.81f, 220.0f, 261.63f, 329.63f}},           // Am
+                {4, {146.83f, 220.0f, 293.66f, 349.23f, 0.0f, 0.0f}},       // Dm
+                {6, {82.41f, 123.47f, 164.81f, 207.65f, 246.94f, 329.63f}}, // E
+                {5, {110.0f, 164.81f, 220.0f, 261.63f, 329.63f}},           // Am
+            };
+            // 1 = acento, 0.6 = fraca, 0 = nao bate
+            const float pad[8] = {1.0f, 0.0f, 0.6f, 0.6f, 1.0f, 0.0f, 0.6f, 0.6f};
+            guitar.samples.assign((size_t)(sr * (4 * 8 * col + 1.5f)), 0.0f);
+            float t = 0.2f;
+            for (int c = 0; c < 4; c++)
+                for (int b = 0; b < 8; b++) {
+                    // add_chord ja' espalha as cordas no tempo, que e' o que
+                    // faz uma batida so' gerar varios ataques.
+                    if (pad[b] > 0.0f)
+                        add_chord(guitar.samples, sr, t, 1.2f, prog[c].f, prog[c].n);
+                    t += col;
+                }
         } else if (climb) {
             // Sobe o braço: E3 até D6. É aqui que o problema das notas agudas
             // aparece, e onde dá pra ouvir o teto agindo.
